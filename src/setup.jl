@@ -17,6 +17,8 @@ function check_claude_status()
                 return :configured_http
             elseif contains(output, "mcp-julia-adapter")
                 return :configured_script
+            elseif contains(output, "run_multiplexer")
+                return :configured_multiplexer
             else
                 return :configured_unknown
             end
@@ -86,7 +88,14 @@ function check_gemini_status()
         if haskey(server_config, "url") && server_config["url"] == "http://localhost:3000"
             return :configured_http
         elseif haskey(server_config, "command")
-            return :configured_script
+            cmd = server_config["command"]
+            if cmd isa String && contains(cmd, "run_multiplexer")
+                return :configured_multiplexer
+            elseif cmd isa Array && any(arg -> contains(string(arg), "run_multiplexer"), cmd)
+                return :configured_multiplexer
+            else
+                return :configured_script
+            end
         else
             return :configured_unknown
         end
@@ -143,6 +152,8 @@ function setup()
         println("📊 Claude status: ✅ MCP server configured (HTTP transport)")
     elseif claude_status == :configured_script
         println("📊 Claude status: ✅ MCP server configured (script transport)")
+    elseif claude_status == :configured_multiplexer
+        println("📊 Claude status: ✅ MCP server configured (multiplexer transport)")
     elseif claude_status == :configured_unknown
         println("📊 Claude status: ✅ MCP server configured (unknown transport)")
     else
@@ -156,6 +167,8 @@ function setup()
         println("📊 Gemini status: ✅ MCP server configured (HTTP transport)")
     elseif gemini_status == :configured_script
         println("📊 Gemini status: ✅ MCP server configured (script transport)")
+    elseif gemini_status == :configured_multiplexer
+        println("📊 Gemini status: ✅ MCP server configured (multiplexer transport)")
     elseif gemini_status == :configured_unknown
         println("📊 Gemini status: ✅ MCP server configured (unknown transport)")
     else
@@ -169,7 +182,7 @@ function setup()
     # Claude options
     if claude_status != :claude_not_found
         println("   Claude Code:")
-        if claude_status in [:configured_http, :configured_script, :configured_unknown]
+        if claude_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("     [1] Remove Claude MCP configuration")
             println("     [2] Add/Replace Claude with HTTP transport")
             println("     [3] Add/Replace Claude with script transport")
@@ -182,7 +195,7 @@ function setup()
     # Gemini options
     if gemini_status != :gemini_not_found
         println("   Gemini CLI:")
-        if gemini_status in [:configured_http, :configured_script, :configured_unknown]
+        if gemini_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("     [4] Remove Gemini MCP configuration")
             println("     [5] Add/Replace Gemini with HTTP transport")
             println("     [6] Add/Replace Gemini with script transport")
@@ -199,7 +212,7 @@ function setup()
 
     # Handle choice
     if choice == "1"
-        if claude_status in [:configured_http, :configured_script, :configured_unknown]
+        if claude_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("\n   Removing Claude MCP configuration...")
             try
                 run(`claude mcp remove julia-repl`)
@@ -217,7 +230,7 @@ function setup()
             end
         end
     elseif choice == "2"
-        if claude_status in [:configured_http, :configured_script, :configured_unknown]
+        if claude_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("\n   Adding/Replacing Claude with HTTP transport...")
             try
                 run(`claude mcp add julia-repl http://localhost:3000 --transport http`)
@@ -235,7 +248,7 @@ function setup()
             end
         end
     elseif choice == "3"
-        if claude_status in [:configured_http, :configured_script, :configured_unknown]
+        if claude_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("\n   Adding/Replacing Claude with script transport...")
             try
                 run(`claude mcp add julia-repl $(pkgdir(MCPRepl))/mcp-julia-adapter`)
@@ -245,7 +258,7 @@ function setup()
             end
         end
     elseif choice == "4"
-        if gemini_status in [:configured_http, :configured_script, :configured_unknown]
+        if gemini_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("\n   Removing Gemini MCP configuration...")
             if remove_gemini_mcp_server()
                 println("   ✅ Successfully removed Gemini MCP configuration")
@@ -261,7 +274,7 @@ function setup()
             end
         end
     elseif choice == "5"
-        if gemini_status in [:configured_http, :configured_script, :configured_unknown]
+        if gemini_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("\n   Adding/Replacing Gemini with HTTP transport...")
             if add_gemini_mcp_server("http")
                 println("   ✅ Successfully configured Gemini HTTP transport")
@@ -277,7 +290,7 @@ function setup()
             end
         end
     elseif choice == "6"
-        if gemini_status in [:configured_http, :configured_script, :configured_unknown]
+        if gemini_status in [:configured_http, :configured_script, :configured_multiplexer, :configured_unknown]
             println("\n   Adding/Replacing Gemini with script transport...")
             if add_gemini_mcp_server("script")
                 println("   ✅ Successfully configured Gemini script transport")

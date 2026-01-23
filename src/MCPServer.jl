@@ -2,19 +2,178 @@
 struct MCPTool
     name::String
     description::String
-    parameters::Dict{String, Any}
+    parameters::Dict{String,Any}
     handler::Function
 end
 
-# Server with tool registry
-struct MCPServer
-    port::Int
-    server::HTTP.Server
-    tools::Dict{String, MCPTool}
+# Server with tool registry supporting both HTTP and socket modes
+mutable struct MCPServer
+    mode::Symbol  # :http or :socket
+    # HTTP mode fields
+    port::Union{Int,Nothing}
+    http_server::Union{HTTP.Server,Nothing}
+    # Socket mode fields
+    socket_path::Union{String,Nothing}
+    socket_server::Union{Sockets.PipeServer,Nothing}
+    # Common fields
+    running::Bool
+    client_tasks::Vector{Task}
+    tools::Dict{String,MCPTool}
+end
+
+const MCP_PROTOCOL_VERSION = "2024-11-05"
+
+# Process a JSON-RPC request and return a response Dict
+function process_jsonrpc_request(request::Dict{String,Any}, tools::Dict{String,MCPTool})
+    # Check if method field exists
+    if !haskey(request, "method")
+        return Dict(
+            "jsonrpc" => "2.0",
+            "id" => get(request, "id", 0),
+            "error" => Dict(
+                "code" => -32600,
+                "message" => "Invalid Request - missing method field"
+            )
+        )
+    end
+
+    method = request["method"]
+    request_id = get(request, "id", nothing)
+
+    # Handle initialization
+    if method == "initialize"
+        return Dict(
+            "jsonrpc" => "2.0",
+            "id" => request_id,
+            "result" => Dict(
+                "protocolVersion" => MCP_PROTOCOL_VERSION,
+                "capabilities" => Dict(
+                    "tools" => Dict()
+                ),
+                "serverInfo" => Dict(
+                    "name" => "julia-mcp-server",
+                    "version" => "1.0.0"
+                )
+            )
+        )
+    end
+
+    # Handle initialized notification
+    if method == "notifications/initialized"
+        return nothing  # Notifications don't get responses
+    end
+
+    # Handle tool listing
+    if method == "tools/list"
+        tool_list = [
+            Dict(
+                "name" => tool.name,
+                "description" => tool.description,
+                "inputSchema" => tool.parameters
+            ) for tool in values(tools)
+        ]
+        return Dict(
+            "jsonrpc" => "2.0",
+            "id" => request_id,
+            "result" => Dict("tools" => tool_list)
+        )
+    end
+
+    # Handle tool calls
+    if method == "tools/call"
+        params = get(request, "params", Dict())
+        tool_name = get(params, "name", "")
+        if haskey(tools, tool_name)
+            tool = tools[tool_name]
+            args = get(params, "arguments", Dict())
+
+            # Call the tool handler
+            result_text = tool.handler(args)
+
+            return Dict(
+                "jsonrpc" => "2.0",
+                "id" => request_id,
+                "result" => Dict(
+                    "content" => [
+                        Dict(
+                            "type" => "text",
+                            "text" => result_text
+                        )
+                    ]
+                )
+            )
+        else
+            return Dict(
+                "jsonrpc" => "2.0",
+                "id" => request_id,
+                "error" => Dict(
+                    "code" => -32602,
+                    "message" => "Tool not found: $tool_name"
+                )
+            )
+        end
+    end
+
+    # Method not found
+    return Dict(
+        "jsonrpc" => "2.0",
+        "id" => request_id,
+        "error" => Dict(
+            "code" => -32601,
+            "message" => "Method not found: $method"
+        )
+    )
+end
+
+# Handle a single socket client connection
+function handle_socket_client(client::IO, tools::Dict{String,MCPTool})
+    try
+        while isopen(client)
+            line = readline(client)
+            isempty(line) && continue
+
+            request_id = 0
+            try
+                request = JSON3.read(line, Dict{String,Any})
+                request_id = get(request, "id", 0)
+                response = process_jsonrpc_request(request, tools)
+
+                # Only send response if not a notification
+                if !isnothing(response)
+                    println(client, JSON3.write(response))
+                end
+            catch e
+                if e isa EOFError
+                    break
+                end
+
+                printstyled("\nMCP Server error: $e\n", color=:red)
+
+                error_response = Dict(
+                    "jsonrpc" => "2.0",
+                    "id" => request_id,
+                    "error" => Dict(
+                        "code" => -32603,
+                        "message" => "Internal error: $e"
+                    )
+                )
+                println(client, JSON3.write(error_response))
+            end
+        end
+    catch e
+        if !(e isa EOFError || e isa Base.IOError)
+            printstyled("\nMCP client handler error: $e\n", color=:red)
+        end
+    finally
+        try
+            close(client)
+        catch
+        end
+    end
 end
 
 # Create request handler with access to tools
-function create_handler(tools::Dict{String, MCPTool}, port::Int)
+function create_handler(tools::Dict{String,MCPTool}, port::Int)
     return function handle_request(req::HTTP.Request)
         # Parse JSON-RPC request
         body = String(req.body)
@@ -94,111 +253,22 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
                 return HTTP.Response(400, ["Content-Type" => "application/json"], JSON3.write(error_response))
             end
 
-            request = JSON3.read(body)
-
-            # Check if method field exists
-            if !haskey(request, :method)
-                error_response = Dict(
-                    "jsonrpc" => "2.0",
-                    "id" => get(request, :id, 0),
-                    "error" => Dict(
-                        "code" => -32600,
-                        "message" => "Invalid Request - missing method field"
-                    )
-                )
-                return HTTP.Response(400, ["Content-Type" => "application/json"], JSON3.write(error_response))
+            # Parse JSON and convert to Dict{String,Any}
+            request_raw = JSON3.read(body)
+            request = Dict{String,Any}()
+            for (k, v) in pairs(request_raw)
+                request[string(k)] = v
             end
 
-            # Handle initialization
-            if request.method == "initialize"
-                response = Dict(
-                    "jsonrpc" => "2.0",
-                    "id" => request.id,
-                    "result" => Dict(
-                        "protocolVersion" => "2024-11-05",
-                        "capabilities" => Dict(
-                            "tools" => Dict()
-                        ),
-                        "serverInfo" => Dict(
-                            "name" => "julia-mcp-server",
-                            "version" => "1.0.0"
-                        )
-                    )
-                )
-                return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(response))
-            end
+            # Process request using common function
+            response = process_jsonrpc_request(request, tools)
 
-            # Handle initialized notification
-            if request.method == "notifications/initialized"
-                # This is a notification, no response needed
+            # Handle notifications (no response)
+            if isnothing(response)
                 return HTTP.Response(200, ["Content-Type" => "application/json"], "{}")
             end
 
-
-            # Handle tool listing
-            if request.method == "tools/list"
-                tool_list = [
-                    Dict(
-                        "name" => tool.name,
-                        "description" => tool.description,
-                        "inputSchema" => tool.parameters
-                    ) for tool in values(tools)
-                ]
-
-                response = Dict(
-                    "jsonrpc" => "2.0",
-                    "id" => request.id,
-                    "result" => Dict("tools" => tool_list)
-                )
-                return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(response))
-            end
-
-            # Handle tool calls
-            if request.method == "tools/call"
-                tool_name = request.params.name
-                if haskey(tools, tool_name)
-                    tool = tools[tool_name]
-                    args = get(request.params, :arguments, Dict())
-
-                    # Call the tool handler
-                    result_text = tool.handler(args)
-
-                    response = Dict(
-                        "jsonrpc" => "2.0",
-                        "id" => request.id,
-                        "result" => Dict(
-                            "content" => [
-                                Dict(
-                                    "type" => "text",
-                                    "text" => result_text
-                                )
-                            ]
-                        )
-                    )
-                    return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(response))
-                else
-                    error_response = Dict(
-                        "jsonrpc" => "2.0",
-                        "id" => request.id,
-                        "error" => Dict(
-                            "code" => -32602,
-                            "message" => "Tool not found: $tool_name"
-                        )
-                    )
-                    return HTTP.Response(404, ["Content-Type" => "application/json"], JSON3.write(error_response))
-                end
-            end
-
-            # Method not found
-            error_response = Dict(
-                "jsonrpc" => "2.0",
-                "id" => get(request, :id, 0),
-                "error" => Dict(
-                    "code" => -32601,
-                    "message" => "Method not found"
-                )
-            )
-            return HTTP.Response(404, ["Content-Type" => "application/json"], JSON3.write(error_response))
+            return HTTP.Response(200, ["Content-Type" => "application/json"], JSON3.write(response))
 
         catch e
             # Internal error - show in REPL and return to client
@@ -234,7 +304,7 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
 end
 
 # Convenience function to create a simple text parameter schema
-function text_parameter(name::String, description::String, required::Bool = true)
+function text_parameter(name::String, description::String, required::Bool=true)
     schema = Dict(
         "type" => "object",
         "properties" => Dict(
@@ -250,61 +320,152 @@ function text_parameter(name::String, description::String, required::Bool = true
     return schema
 end
 
-function start_mcp_server(tools::Vector{MCPTool}, port::Int = 3000; verbose::Bool = true)
+const MAX_CLIENTS = 10
+
+function start_mcp_server(tools::Vector{MCPTool};
+                         mode::Symbol=:http,
+                         port::Int=3000,
+                         socket_path::Union{String,Nothing}=nothing,
+                         verbose::Bool=true)
     tools_dict = Dict(tool.name => tool for tool in tools)
-    handler = create_handler(tools_dict, port)
 
-    # Suppress HTTP server logging
-    server = HTTP.serve!(handler, port; verbose=false)
+    if mode == :http
+        # HTTP mode
+        handler = create_handler(tools_dict, port)
 
-    if verbose
-        # Check MCP status and show contextual message
-        claude_status = MCPRepl.check_claude_status()
-        gemini_status = MCPRepl.check_gemini_status()
+        # Suppress HTTP server logging
+        http_server = HTTP.serve!(handler, port; verbose=false)
 
-        # Claude status
-        if claude_status == :configured_http
-            println("✅ Claude: MCP server configured (HTTP transport)")
-        elseif claude_status == :configured_script
-            println("✅ Claude: MCP server configured (script transport)")
-        elseif claude_status == :configured_unknown
-            println("✅ Claude: MCP server configured")
-        elseif claude_status == :claude_not_found
-            println("⚠️ Claude: Not found in PATH")
-        else
-            println("⚠️ Claude: MCP server not configured")
-        end
+        if verbose
+            # Check MCP status and show contextual message
+            claude_status = MCPRepl.check_claude_status()
+            gemini_status = MCPRepl.check_gemini_status()
 
-        # Gemini status
-        if gemini_status == :configured_http
-            println("✅ Gemini: MCP server configured (HTTP transport)")
-        elseif gemini_status == :configured_script
-            println("✅ Gemini: MCP server configured (script transport)")
-        elseif gemini_status == :configured_unknown
-            println("✅ Gemini: MCP server configured")
-        elseif gemini_status == :gemini_not_found
-            println("⚠️ Gemini: Not found in PATH")
-        else
-            println("⚠️ Gemini: MCP server not configured")
-        end
+            # Claude status
+            if claude_status == :configured_http
+                println("✅ Claude: MCP server configured (HTTP transport)")
+            elseif claude_status == :configured_script
+                println("✅ Claude: MCP server configured (script transport)")
+            elseif claude_status == :configured_unknown
+                println("✅ Claude: MCP server configured")
+            elseif claude_status == :claude_not_found
+                println("⚠️ Claude: Not found in PATH")
+            else
+                println("⚠️ Claude: MCP server not configured")
+            end
 
-        # Show setup guidance if needed
-        if claude_status == :not_configured || gemini_status == :not_configured
+            # Gemini status
+            if gemini_status == :configured_http
+                println("✅ Gemini: MCP server configured (HTTP transport)")
+            elseif gemini_status == :configured_script
+                println("✅ Gemini: MCP server configured (script transport)")
+            elseif gemini_status == :configured_unknown
+                println("✅ Gemini: MCP server configured")
+            elseif gemini_status == :gemini_not_found
+                println("⚠️ Gemini: Not found in PATH")
+            else
+                println("⚠️ Gemini: MCP server not configured")
+            end
+
+            # Show setup guidance if needed
+            if claude_status == :not_configured || gemini_status == :not_configured
+                println()
+                println("💡 Call MCPRepl.setup() to configure MCP servers interactively")
+            end
+
             println()
-            println("💡 Call MCPRepl.setup() to configure MCP servers interactively")
+            println("🚀 MCP Server running on port $port with $(length(tools)) tools")
+            println()
+        else
+            println("MCP Server running on port $port with $(length(tools)) tools")
         end
 
-        println()
-        println("🚀 MCP Server running on port $port with $(length(tools)) tools")
-        println()  # Add blank line at end of splash
-    else
-        println("MCP Server running on port $port with $(length(tools)) tools")
-    end
+        return MCPServer(:http, port, http_server, nothing, nothing, true, Task[], tools_dict)
 
-    return MCPServer(port, server, tools_dict)
+    elseif mode == :socket
+        # Socket mode
+        if isnothing(socket_path)
+            error("socket_path is required for socket mode")
+        end
+
+        # Remove existing socket if present
+        ispath(socket_path) && rm(socket_path)
+
+        socket_server = Sockets.listen(socket_path)
+        mcp_server = MCPServer(:socket, nothing, nothing, socket_path, socket_server, true, Task[], tools_dict)
+
+        # Start accepting clients in background
+        @async begin
+            while mcp_server.running
+                try
+                    client = accept(socket_server)
+
+                    # Clean up completed tasks before adding new one
+                    filter!(t -> !istaskdone(t), mcp_server.client_tasks)
+
+                    # Check client limit
+                    if length(mcp_server.client_tasks) >= MAX_CLIENTS
+                        printstyled("\nMCP Server: max clients ($MAX_CLIENTS) reached, rejecting connection\n", color=:yellow)
+                        close(client)
+                        continue
+                    end
+
+                    task = @async handle_socket_client(client, tools_dict)
+                    push!(mcp_server.client_tasks, task)
+                catch e
+                    if mcp_server.running && !(e isa Base.IOError)
+                        printstyled("\nMCP Server accept error: $e\n", color=:red)
+                    end
+                end
+            end
+        end
+
+        if verbose
+            println("🚀 MCP Server running on $socket_path with $(length(tools)) tools")
+            println()
+        else
+            println("MCP Server running on $socket_path with $(length(tools)) tools")
+        end
+
+        return mcp_server
+
+    else
+        error("Invalid mode: $mode (must be :http or :socket)")
+    end
 end
 
 function stop_mcp_server(server::MCPServer)
-    HTTP.close(server.server)
+    if server.mode == :http
+        # HTTP mode
+        if !isnothing(server.http_server)
+            HTTP.close(server.http_server)
+        end
+    elseif server.mode == :socket
+        # Socket mode
+        server.running = false
+
+        # Close the server socket
+        if !isnothing(server.socket_server)
+            try
+                close(server.socket_server)
+            catch
+            end
+        end
+
+        # Wait for client tasks to finish
+        for task in server.client_tasks
+            try
+                wait(task)
+            catch
+            end
+        end
+        empty!(server.client_tasks)
+
+        # Remove socket
+        if !isnothing(server.socket_path) && ispath(server.socket_path)
+            rm(server.socket_path)
+        end
+    end
+
     println("MCP Server stopped")
 end

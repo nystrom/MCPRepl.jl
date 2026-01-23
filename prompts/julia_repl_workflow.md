@@ -2,6 +2,14 @@
 
 This prompt teaches AI agents the proper workflow for Julia development using the exec_repl tool, emphasizing respectful shared REPL usage and best practices.
 
+## Architecture Modes
+
+MCPRepl.jl supports two modes:
+- **HTTP Mode (Default)**: Single Julia REPL server on port 3000. Tools do not have a `project_dir` parameter.
+- **Socket Mode (Advanced)**: Multiple Julia REPL servers with multiplexer routing. Tools require a `project_dir` parameter.
+
+If you see a `project_dir` parameter on the `exec_repl` tool, you are in socket mode. The multiplexer will route your request to the correct Julia server based on the project directory.
+
 ## Core Principles
 
 ### 🚨 MCP Server Requirement
