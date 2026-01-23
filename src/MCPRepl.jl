@@ -47,20 +47,7 @@ function execute_repllike(str)
         str = replace(str, r"(^|\n)(import\s[^\n]*)" => s"\1@eval \2")
     end
 
-
-    # alternative approach to @eval on using/import?
-    # old_stdin = stdin
-    # redirect_stdin(devnull)
-    # try
-    #     using Optim
-    # catch e
-    #     rethrow(e)
-    # finally
-    #     redirect_stdin(old_stdin)
-    # end
-
     repl = Base.active_repl
-    # expr = Meta.parse(str)
     expr = Base.parse_input_line(str)
     backend = repl.backendref
 
@@ -99,7 +86,7 @@ function execute_repllike(str)
     # Combine captured output with display output
     display_content = String(take!(disp.io))
 
-    return captured_content*display_content
+    return captured_content * display_content
 end
 
 SERVER = Ref{Union{Nothing,MCPServer}}(nothing)
