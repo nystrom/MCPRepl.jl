@@ -2,7 +2,7 @@
 struct MCPTool
     name::String
     description::String
-    parameters::Dict{String, Any}
+    parameters::Dict{String,Any}
     handler::Function
 end
 
@@ -10,11 +10,11 @@ end
 struct MCPServer
     port::Int
     server::HTTP.Server
-    tools::Dict{String, MCPTool}
+    tools::Dict{String,MCPTool}
 end
 
 # Create request handler with access to tools
-function create_handler(tools::Dict{String, MCPTool}, port::Int)
+function create_handler(tools::Dict{String,MCPTool}, port::Int)
     return function handle_request(req::HTTP.Request)
         # Parse JSON-RPC request
         body = String(req.body)
@@ -23,10 +23,10 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
             # Handle OAuth well-known metadata requests first (before JSON parsing)
             if req.target == "/.well-known/oauth-authorization-server"
                 oauth_metadata = Dict(
-                    "issuer" => "http://localhost:$port",
-                    "authorization_endpoint" => "http://localhost:$port/oauth/authorize",
-                    "token_endpoint" => "http://localhost:$port/oauth/token",
-                    "registration_endpoint" => "http://localhost:$port/oauth/register",
+                    "issuer" => "http://localhost:$(port)",
+                    "authorization_endpoint" => "http://localhost:$(port)/oauth/authorize",
+                    "token_endpoint" => "http://localhost:$(port)/oauth/token",
+                    "registration_endpoint" => "http://localhost:$(port)/oauth/register",
                     "grant_types_supported" => ["authorization_code", "client_credentials"],
                     "response_types_supported" => ["code"],
                     "scopes_supported" => ["read", "write"],
@@ -63,7 +63,7 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
                 state = get(query_params, "state", "")
 
                 auth_code = "auth_" * string(rand(UInt64), base=16)
-                redirect_url = "$redirect_uri?code=$auth_code&state=$state"
+                redirect_url = "$(redirect_uri)?code=$(auth_code)&state=$(state)"
 
                 return HTTP.Response(302, ["Location" => redirect_url], "")
             end
@@ -182,7 +182,7 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
                         "id" => request.id,
                         "error" => Dict(
                             "code" => -32602,
-                            "message" => "Tool not found: $tool_name"
+                            "message" => "Tool not found: $(tool_name)"
                         )
                     )
                     return HTTP.Response(404, ["Content-Type" => "application/json"], JSON3.write(error_response))
@@ -202,7 +202,7 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
 
         catch e
             # Internal error - show in REPL and return to client
-            printstyled("\nMCP Server error: $e\n", color=:red)
+            printstyled("\nMCP Server error: $(e)\n", color=:red)
 
             # Try to get the original request ID for proper JSON-RPC error response
             request_id = 0  # Default to 0 instead of nothing to satisfy JSON-RPC schema
@@ -211,7 +211,7 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
                     parsed_request = JSON3.read(body)
                     # Only use the request ID if it's a valid JSON-RPC ID (string or number)
                     raw_id = get(parsed_request, :id, 0)
-                    if raw_id isa Union{String, Number}
+                    if raw_id isa Union{String,Number}
                         request_id = raw_id
                     end
                 end
@@ -225,7 +225,7 @@ function create_handler(tools::Dict{String, MCPTool}, port::Int)
                 "id" => request_id,
                 "error" => Dict(
                     "code" => -32603,
-                    "message" => "Internal error: $e"
+                    "message" => "Internal error: $(e)"
                 )
             )
             return HTTP.Response(500, ["Content-Type" => "application/json"], JSON3.write(error_response))
@@ -295,10 +295,10 @@ function start_mcp_server(tools::Vector{MCPTool}, port::Int = 3000; verbose::Boo
         end
 
         println()
-        println("🚀 MCP Server running on port $port with $(length(tools)) tools")
+        println("🚀 MCP Server running on port $(port) with $(length(tools)) tools")
         println()  # Add blank line at end of splash
     else
-        println("MCP Server running on port $port with $(length(tools)) tools")
+        println("MCP Server running on port $(port) with $(length(tools)) tools")
     end
 
     return MCPServer(port, server, tools_dict)

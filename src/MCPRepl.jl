@@ -102,7 +102,7 @@ function execute_repllike(str)
     return captured_content*display_content
 end
 
-SERVER = Ref{Union{Nothing, MCPServer}}(nothing)
+SERVER = Ref{Union{Nothing,MCPServer}}(nothing)
 
 function repl_status_report()
     if !isdefined(Main, :Pkg)
@@ -124,8 +124,8 @@ function repl_status_report()
         # Active project
         active_proj = Base.active_project()
         println("📦 Active Project:")
-        if active_proj !== nothing
-            println("   Path: $active_proj")
+        if !isnothing(active_proj)
+            println("   Path: $(active_proj)")
             try
                 project_data = Pkg.TOML.parsefile(active_proj)
                 if haskey(project_data, "name")
@@ -137,7 +137,7 @@ function repl_status_report()
                     println("   Version: $(project_data["version"])")
                 end
             catch e
-                println("   Error reading project info: $e")
+                println("   Error reading project info: $(e)")
             end
         else
             println("   No active project")
@@ -163,7 +163,7 @@ function repl_status_report()
             end
 
             # Add current environment package if it's a development package
-            if active_proj !== nothing
+            if !isnothing(active_proj)
                 try
                     project_data = Pkg.TOML.parsefile(active_proj)
                     if haskey(project_data, "uuid")
@@ -179,7 +179,7 @@ function repl_status_report()
 
             # Check if current environment is itself a package and collect its info
             current_env_package = nothing
-            if active_proj !== nothing
+            if !isnothing(active_proj)
                 try
                     project_data = Pkg.TOML.parsefile(active_proj)
                     if haskey(project_data, "uuid")
@@ -208,18 +208,18 @@ function repl_status_report()
             end
 
             # List development packages first (with current environment package at the top if applicable)
-            has_dev_packages = !isempty(dev_deps) || current_env_package !== nothing
+            has_dev_packages = !isempty(dev_deps) || !isnothing(current_env_package)
             if has_dev_packages
                 println("   🔧 Development packages (tracked by Revise):")
 
                 # Show current environment package first if it exists
-                if current_env_package !== nothing
+                if !isnothing(current_env_package)
                     println("      $(current_env_package.name) v$(current_env_package.version) [CURRENT ENV] => $(current_env_package.path)")
                     try
                         # Try to get canonical path using pkgdir
                         pkg_dir = pkgdir(current_env_package.name)
-                        if pkg_dir !== nothing && pkg_dir != current_env_package.path
-                            println("         pkgdir(): $pkg_dir")
+                        if !isnothing(pkg_dir) && pkg_dir != current_env_package.path
+                            println("         pkgdir(): $(pkg_dir)")
                         end
                     catch
                         # pkgdir might fail, that's okay
@@ -229,15 +229,15 @@ function repl_status_report()
                 # Then show other development packages
                 for pkg_info in dev_deps
                     # Skip if this is the same as the current environment package
-                    if current_env_package !== nothing && pkg_info.name == current_env_package.name
+                    if !isnothing(current_env_package) && pkg_info.name == current_env_package.name
                         continue
                     end
                     println("      $(pkg_info.name) v$(pkg_info.version) => $(dev_packages[pkg_info.name])")
                     try
                         # Try to get canonical path using pkgdir
                         pkg_dir = pkgdir(pkg_info.name)
-                        if pkg_dir !== nothing && pkg_dir != dev_packages[pkg_info.name]
-                            println("         pkgdir(): $pkg_dir")
+                        if !isnothing(pkg_dir) && pkg_dir != dev_packages[pkg_info.name]
+                            println("         pkgdir(): $(pkg_dir)")
                         end
                     catch
                         # pkgdir might fail, that's okay
@@ -255,12 +255,12 @@ function repl_status_report()
             end
 
             # Handle empty environment
-            if isempty(deps) && current_env_package === nothing
+            if isempty(deps) && isnothing(current_env_package)
                 println("   No packages in environment")
             end
 
         catch e
-            println("   Error getting package status: $e")
+            println("   Error getting package status: $(e)")
         end
 
         println()
@@ -279,7 +279,7 @@ function repl_status_report()
         return nothing
 
     catch e
-        println("Error generating environment report: $e")
+        println("Error generating environment report: $(e)")
         return nothing
     end
 end
@@ -301,10 +301,10 @@ function start!(; verbose::Bool = true)
                 if isfile(workflow_path)
                     return read(workflow_path, String)
                 else
-                    return "Error: julia_repl_workflow.md not found at $workflow_path"
+                    return "Error: julia_repl_workflow.md not found at $(workflow_path)"
                 end
             catch e
-                return "Error reading usage instructions: $e"
+                return "Error reading usage instructions: $(e)"
             end
         end
     )
@@ -332,7 +332,7 @@ function start!(; verbose::Bool = true)
                 execute_repllike(get(args, "expression", ""))
             catch e
                 println("Error during execute_repllike", e)
-                "Apparently there was an **internal** error to the MCP server: $e"
+                "Apparently there was an **internal** error to the MCP server: $(e)"
             end
         end
     )
@@ -358,7 +358,7 @@ function start!(; verbose::Bool = true)
                 end
 
                 if !isfile(file_path)
-                    return "Error: File does not exist: $file_path"
+                    return "Error: File does not exist: $(file_path)"
                 end
 
                 # Use sed to remove trailing whitespace (similar to emacs delete-trailing-whitespace)
@@ -366,12 +366,12 @@ function start!(; verbose::Bool = true)
                 result = run(pipeline(`sed -i 's/[[:space:]]*$//' $file_path`, stderr=devnull))
 
                 if result.exitcode == 0
-                    return "Successfully removed trailing whitespace from $file_path"
+                    return "Successfully removed trailing whitespace from $(file_path)"
                 else
-                    return "Error: Failed to remove trailing whitespace from $file_path"
+                    return "Error: Failed to remove trailing whitespace from $(file_path)"
                 end
             catch e
-                return "Error removing trailing whitespace: $e"
+                return "Error removing trailing whitespace: $(e)"
             end
         end
     )
@@ -398,7 +398,7 @@ function start!(; verbose::Bool = true)
             try
                 execute_repllike("MCPRepl.repl_status_report()")
             catch e
-                "Error investigating environment: $e"
+                "Error investigating environment: $(e)"
             end
         end
     )
