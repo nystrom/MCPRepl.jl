@@ -13,7 +13,7 @@ Options:
     --port PORT               Port for HTTP mode (default: 3000)
 
 The Julia MCP server must be running in each project directory:
-    julia --project -e "using MCPRepl; MCPRepl.start!()"
+    julia --project -e "using MCPRepl; MCPRepl.start!(multiplex=true)"
 """
 module MCPPlex
 
@@ -22,12 +22,19 @@ using JSON3
 using Sockets
 using HTTP
 
+# Import from Tools module (included in parent MCPRepl module)
+using ..Tools: TOOL_DEFINITIONS, make_tool_schema, get_tool_description, get_tool_names
+
 const SOCKET_NAME = ".mcp-repl.sock"
 const PID_NAME = ".mcp-repl.pid"
 const MCP_PROTOCOL_VERSION = "2024-11-05"
 
+# NOTE: SOCKET_CACHE is not thread-safe. This multiplexer assumes single-threaded
+# operation. If running with multiple threads, add appropriate locking around cache access.
 const SOCKET_CACHE = Dict{String,Tuple{Union{String,Nothing},Float64}}()
 const SOCKET_CACHE_TTL = 10.0
+
+const TASK_CLEANUP_INTERVAL = 100
 
 """
     find_socket_path(start_dir::String) -> Union{String,Nothing}
@@ -95,24 +102,17 @@ Execute function f with a timeout. Throws ErrorException if timeout is exceeded.
 """
 function with_timeout(f, timeout::Float64)
     task = @async f()
-    timer = Timer(timeout)
 
-    try
-        while !istaskdone(task)
-            if !isopen(timer)
-                try
-                    Base.throwto(task, ErrorException("Operation timed out after $timeout seconds"))
-                catch
-                end
-                wait(task)
-                error("Operation timed out after $timeout seconds")
-            end
-            sleep(0.01)
+    if timedwait(() -> istaskdone(task), timeout) == :timed_out
+        try
+            Base.throwto(task, ErrorException("Operation timed out after $timeout seconds"))
+        catch
         end
-        return fetch(task)
-    finally
-        close(timer)
+        wait(task)
+        error("Operation timed out after $timeout seconds")
     end
+
+    return fetch(task)
 end
 
 """
@@ -207,7 +207,7 @@ function forward_to_julia_server_async(tool_name::String, project_dir::String, t
         if isnothing(socket_path)
             msg = "Error: MCP REPL server not found in $project_dir"
             if include_startup_msg
-                msg *= ". Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
+                msg *= ". Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!(multiplex=true)'"
             end
             return msg
         end
@@ -215,7 +215,7 @@ function forward_to_julia_server_async(tool_name::String, project_dir::String, t
         if !check_server_running(socket_path)
             msg = "Error: MCP REPL server not running"
             if include_startup_msg
-                msg *= " (socket exists but process dead). Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
+                msg *= " (socket exists but process dead). Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!(multiplex=true)'"
             end
             return msg
         end
@@ -231,9 +231,9 @@ function forward_to_julia_server_async(tool_name::String, project_dir::String, t
         )
 
         try
-            response = fetch(send_to_julia_server_async(socket_path, julia_request))
+            response = send_to_julia_server(socket_path, julia_request)
             if haskey(response, "error")
-                return "Error from Julia server: $(response["error"]["message"])"
+                return "Error: Julia server returned error: $(response["error"]["message"])"
             end
             if haskey(response, "result") && haskey(response["result"], "content")
                 content = response["result"]["content"]
@@ -243,7 +243,7 @@ function forward_to_julia_server_async(tool_name::String, project_dir::String, t
             end
             return string(get(response, "result", ""))
         catch e
-            return "Error communicating with Julia server: $e"
+            return "Error: Failed to communicate with Julia server: $e"
         end
     end
 end
@@ -258,6 +258,10 @@ This is a synchronous wrapper around forward_to_julia_server_async.
 function forward_to_julia_server(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false)
     return fetch(forward_to_julia_server_async(tool_name, project_dir, tool_args, include_startup_msg))
 end
+
+#==============================================================================#
+# Forwarding Handlers - extract project_dir and forward to Julia server
+#==============================================================================#
 
 """
     handle_exec_repl(args::Dict{String,Any}) -> String
@@ -312,72 +316,59 @@ function handle_usage_instructions(args::Dict{String,Any})
     return forward_to_julia_server("usage_instructions", project_dir, Dict(), false)
 end
 
-# MCP Tool definitions
-const TOOLS = [
-    Dict(
-        "name" => "exec_repl",
-        "description" => """Execute Julia code in a shared, persistent REPL session.
+"""
+    handle_remove_trailing_whitespace(args::Dict{String,Any}) -> String
 
-**PREREQUISITE**: Before using this tool, you MUST first call the `usage_instructions` tool.
+Handle remove-trailing-whitespace tool call.
+Takes project_dir and file_path, forwards to Julia server.
+"""
+function handle_remove_trailing_whitespace(args::Dict{String,Any})
+    project_dir = get(args, "project_dir", "")
+    file_path = get(args, "file_path", "")
 
-The tool returns raw text output containing: all printed content from stdout and stderr streams, plus the mime text/plain representation of the expression's return value (unless the expression ends with a semicolon).
+    if isempty(project_dir)
+        return "Error: project_dir parameter is required"
+    end
 
-You may use this REPL to execute julia code, run test sets, get function documentation, etc.""",
-        "inputSchema" => Dict(
-            "type" => "object",
-            "properties" => Dict(
-                "project_dir" => Dict(
-                    "type" => "string",
-                    "description" => "Directory where the Julia project is located (used to find the REPL socket)"
-                ),
-                "expression" => Dict(
-                    "type" => "string",
-                    "description" => "Julia expression to evaluate (e.g., '2 + 3 * 4' or `import Pkg; Pkg.status()`)"
-                )
-            ),
-            "required" => ["project_dir", "expression"]
-        ),
-        "handler" => handle_exec_repl
-    ),
-    Dict(
-        "name" => "investigate_environment",
-        "description" => """Investigate the current Julia environment including pwd, active project, packages, and development packages with their paths.
+    if isempty(file_path)
+        return "Error: file_path parameter is required"
+    end
 
-This tool provides comprehensive information about:
-- Current working directory
-- Active project and its details
-- All packages in the environment with development status
-- Development packages with their file system paths
-- Current environment package status
-- Revise.jl status for hot reloading""",
-        "inputSchema" => Dict(
-            "type" => "object",
-            "properties" => Dict(
-                "project_dir" => Dict(
-                    "type" => "string",
-                    "description" => "Directory where the Julia project is located"
-                )
-            ),
-            "required" => ["project_dir"]
-        ),
-        "handler" => handle_investigate_environment
-    ),
-    Dict(
-        "name" => "usage_instructions",
-        "description" => "Get detailed instructions for proper Julia REPL usage, best practices, and workflow guidelines.",
-        "inputSchema" => Dict(
-            "type" => "object",
-            "properties" => Dict(
-                "project_dir" => Dict(
-                    "type" => "string",
-                    "description" => "Directory where the Julia project is located"
-                )
-            ),
-            "required" => ["project_dir"]
-        ),
-        "handler" => handle_usage_instructions
-    )
-]
+    return forward_to_julia_server("remove-trailing-whitespace", project_dir, Dict("file_path" => file_path), false)
+end
+
+#==============================================================================#
+# Tool Generation and Lookup
+#==============================================================================#
+
+# Handler lookup table - maps tool names to their forwarding handlers
+const TOOL_HANDLERS = Dict(
+    "exec_repl" => handle_exec_repl,
+    "investigate_environment" => handle_investigate_environment,
+    "usage_instructions" => handle_usage_instructions,
+    "remove-trailing-whitespace" => handle_remove_trailing_whitespace
+)
+
+"""
+    get_tools() -> Vector{Dict}
+
+Generate tool definitions with project_dir parameter included.
+This is used by the multiplexer which always needs project_dir for routing.
+"""
+function get_tools()
+    tools = Dict[]
+    for tool_name in get_tool_names()
+        if haskey(TOOL_HANDLERS, tool_name)
+            push!(tools, Dict(
+                "name" => tool_name,
+                "description" => get_tool_description(tool_name),
+                "inputSchema" => make_tool_schema(tool_name; include_project_dir=true),
+                "handler" => TOOL_HANDLERS[tool_name]
+            ))
+        end
+    end
+    return tools
+end
 
 """
     process_mcp_request(request::Dict) -> Union{Dict,Nothing}
@@ -409,12 +400,13 @@ function process_mcp_request(request::Dict)
 
     # Handle tool listing
     if method == "tools/list"
+        tools = get_tools()
         tool_list = [
             Dict(
                 "name" => tool["name"],
                 "description" => tool["description"],
                 "inputSchema" => tool["inputSchema"]
-            ) for tool in TOOLS
+            ) for tool in tools
         ]
         return create_success_response(request_id, Dict("tools" => tool_list))
     end
@@ -425,15 +417,14 @@ function process_mcp_request(request::Dict)
         tool_name = get(params, "name", "")
         args = get(params, "arguments", Dict())
 
-        # Find tool
-        tool = findfirst(t -> t["name"] == tool_name, TOOLS)
-        if isnothing(tool)
+        # Find tool handler
+        if !haskey(TOOL_HANDLERS, tool_name)
             return create_error_response(request_id, -32602, "Tool not found: $tool_name")
         end
 
         # Call tool handler
         try
-            result_text = TOOLS[tool]["handler"](args)
+            result_text = TOOL_HANDLERS[tool_name](args)
             return create_success_response(request_id, Dict(
                 "content" => [
                     Dict(
@@ -460,6 +451,7 @@ Processes requests asynchronously for better concurrency.
 function run_stdio_mode()
     output_lock = ReentrantLock()
     active_tasks = Task[]
+    request_count = 0
 
     try
         while !eof(stdin)
@@ -495,9 +487,12 @@ function run_stdio_mode()
             end
 
             push!(active_tasks, task)
+            request_count += 1
 
             # Clean up completed tasks periodically
-            filter!(t -> !istaskdone(t), active_tasks)
+            if request_count % TASK_CLEANUP_INTERVAL == 0
+                filter!(t -> !istaskdone(t), active_tasks)
+            end
         end
     finally
         # Wait for all active tasks to complete
@@ -604,7 +599,7 @@ function parse_arguments(args::Vector{String})
     s = ArgParseSettings(
         prog = "julia -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' --",
         description = "MCP Julia REPL Multiplexer - MCP server that forwards to Julia REPL servers",
-        epilog = "The Julia MCP server must be running in each project directory:\n  julia --project -e \"using MCPRepl; MCPRepl.start!()\"",
+        epilog = "The Julia MCP server must be running in each project directory:\n  julia --project -e \"using MCPRepl; MCPRepl.start!(multiplex=true)\"",
         exit_after_help = false
     )
 

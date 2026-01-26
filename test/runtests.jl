@@ -45,8 +45,8 @@ using Sockets
             test_port = 3001
             server = MCPRepl.start_mcp_server(tools; mode=:http, port=test_port, verbose=false)
 
-            @test server.mode == :http
-            @test server.port == test_port
+            @test server.handle isa MCPRepl.HttpServerHandle
+            @test server.handle.port == test_port
             @test length(server.tools) == 3
             @test haskey(server.tools, "get_time")
             @test haskey(server.tools, "reverse_text")
@@ -246,12 +246,12 @@ using Sockets
                 # Start socket server
                 server = MCPRepl.start_mcp_server(tools; mode=:socket, socket_path=socket_path, verbose=false)
 
-                @test server.mode == :socket
-                @test server.socket_path == socket_path
+                @test server.handle isa MCPRepl.SocketServerHandle
+                @test server.handle.socket_path == socket_path
                 @test length(server.tools) == 2
                 @test haskey(server.tools, "get_time")
                 @test haskey(server.tools, "reverse_text")
-                @test server.running == true
+                @test server.handle.running == true
 
                 # Verify socket file exists
                 @test ispath(socket_path)
@@ -264,7 +264,7 @@ using Sockets
 
                 # Verify socket file is removed
                 @test !ispath(socket_path)
-                @test server.running == false
+                @test server.handle.running == false
 
                 # Give server time to stop
                 sleep(0.1)
@@ -494,6 +494,266 @@ using Sockets
             finally
                 rm(test_dir; recursive=true, force=true)
             end
+        end
+    end
+
+    @testset "Multiplexer Tests" begin
+        @testset "Socket Path Discovery" begin
+            # Test find_socket_path with socket in current directory
+            test_dir = mktempdir()
+            try
+                socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                touch(socket_path)
+
+                found_path = MCPRepl.MCPPlex.find_socket_path(test_dir)
+                @test found_path == socket_path
+
+                rm(socket_path)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Socket Path Discovery - Parent Directory" begin
+            # Test find_socket_path walking up directory tree
+            test_root = mktempdir()
+            try
+                # Create nested directory structure
+                subdir = joinpath(test_root, "subdir")
+                mkdir(subdir)
+                subsubdir = joinpath(subdir, "subsubdir")
+                mkdir(subsubdir)
+
+                # Place socket in root
+                socket_path = joinpath(test_root, ".mcp-repl.sock")
+                touch(socket_path)
+
+                # Search from nested directory should find parent socket
+                found_path = MCPRepl.MCPPlex.find_socket_path(subsubdir)
+                @test found_path == socket_path
+
+                rm(socket_path)
+            finally
+                rm(test_root; recursive=true, force=true)
+            end
+        end
+
+        @testset "Socket Path Discovery - Not Found" begin
+            test_dir = mktempdir()
+            try
+                # No socket file exists
+                found_path = MCPRepl.MCPPlex.find_socket_path(test_dir)
+                @test isnothing(found_path)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Socket Path Caching" begin
+            test_dir = mktempdir()
+            try
+                socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                touch(socket_path)
+
+                # First call should populate cache
+                found1 = MCPRepl.MCPPlex.find_socket_path(test_dir)
+                @test found1 == socket_path
+
+                # Remove socket file
+                rm(socket_path)
+
+                # Second call within TTL should return cached result
+                found2 = MCPRepl.MCPPlex.find_socket_path(test_dir)
+                @test found2 == socket_path
+
+                # Clear cache by waiting past TTL (or we can manipulate cache directly)
+                # For testing, we'll check that the cache exists
+                @test haskey(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
+            finally
+                # Clear this entry from cache
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Check Server Running" begin
+            test_dir = mktempdir()
+            try
+                socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                pid_path = joinpath(test_dir, ".mcp-repl.pid")
+
+                # No PID file
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Invalid PID
+                write(pid_path, "not_a_number")
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+                rm(pid_path)
+
+                # Stale PID
+                write(pid_path, "999999")
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+                rm(pid_path)
+
+                # Valid PID (current process)
+                write(pid_path, string(getpid()))
+                @test MCPRepl.MCPPlex.check_server_running(socket_path)
+                rm(pid_path)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Multi-Project Forwarding" begin
+            # Create two separate project directories with servers
+            proj1_dir = mktempdir()
+            proj2_dir = mktempdir()
+
+            time_tool = MCPTool(
+                "get_time",
+                "Get current time",
+                MCPRepl.text_parameter("format", "Format string"),
+                args -> Dates.format(now(), get(args, "format", "yyyy-mm-dd HH:MM:SS"))
+            )
+
+            echo_tool = MCPTool(
+                "echo",
+                "Echo text",
+                MCPRepl.text_parameter("text", "Text to echo"),
+                args -> get(args, "text", "")
+            )
+
+            try
+                # Start server in proj1
+                socket1 = joinpath(proj1_dir, ".mcp-repl.sock")
+                server1 = MCPRepl.start_mcp_server([time_tool]; mode=:socket, socket_path=socket1, verbose=false)
+                MCPRepl.write_pid_file(proj1_dir)
+                sleep(0.1)
+
+                # Start server in proj2
+                socket2 = joinpath(proj2_dir, ".mcp-repl.sock")
+                server2 = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket2, verbose=false)
+                MCPRepl.write_pid_file(proj2_dir)
+                sleep(0.1)
+
+                # Test forwarding to proj1
+                result1 = MCPRepl.MCPPlex.forward_to_julia_server("get_time", proj1_dir, Dict{String,Any}("format" => "yyyy-mm-dd"), false)
+                @test occursin(r"\d{4}-\d{2}-\d{2}", result1)
+
+                # Test forwarding to proj2
+                result2 = MCPRepl.MCPPlex.forward_to_julia_server("echo", proj2_dir, Dict{String,Any}("text" => "hello from proj2"), false)
+                @test result2 == "hello from proj2"
+
+                # Stop servers
+                MCPRepl.stop_mcp_server(server1)
+                MCPRepl.stop_mcp_server(server2)
+                MCPRepl.remove_pid_file(proj1_dir)
+                MCPRepl.remove_pid_file(proj2_dir)
+            finally
+                rm(proj1_dir; recursive=true, force=true)
+                rm(proj2_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Multiplexer Error Handling" begin
+            test_dir = mktempdir()
+
+            try
+                # Test with non-existent server
+                result = MCPRepl.MCPPlex.forward_to_julia_server("some_tool", test_dir, Dict{String,Any}(), true)
+                @test occursin("Error: MCP REPL server not found", result)
+                @test occursin("Start the server with", result)
+
+                # Test with stale server (socket exists but process dead)
+                socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                pid_path = joinpath(test_dir, ".mcp-repl.pid")
+                touch(socket_path)
+                write(pid_path, "999999")
+
+                # Clear cache so it finds the socket we just created
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
+
+                result = MCPRepl.MCPPlex.forward_to_julia_server("some_tool", test_dir, Dict{String,Any}(), true)
+                @test occursin("Error: MCP REPL server not running", result)
+
+                rm(socket_path)
+                rm(pid_path)
+            finally
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Multiplexer Tool Handlers" begin
+            test_dir = mktempdir()
+            socket_path = joinpath(test_dir, ".mcp-repl.sock")
+
+            echo_tool = MCPTool(
+                "echo",
+                "Echo text",
+                MCPRepl.text_parameter("text", "Text to echo"),
+                args -> get(args, "text", "")
+            )
+
+            try
+                server = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket_path, verbose=false)
+                MCPRepl.write_pid_file(test_dir)
+                sleep(0.1)
+
+                # Test handle_exec_repl (would need actual REPL tools)
+                result = MCPRepl.MCPPlex.handle_exec_repl(Dict{String,Any}("project_dir" => "", "expression" => "2+2"))
+                @test occursin("Error: project_dir parameter is required", result)
+
+                result = MCPRepl.MCPPlex.handle_exec_repl(Dict{String,Any}("project_dir" => test_dir, "expression" => ""))
+                @test occursin("Error: expression parameter is required", result)
+
+                # Test handle_investigate_environment
+                result = MCPRepl.MCPPlex.handle_investigate_environment(Dict{String,Any}())
+                @test occursin("Error: project_dir parameter is required", result)
+
+                # Test handle_usage_instructions
+                result = MCPRepl.MCPPlex.handle_usage_instructions(Dict{String,Any}())
+                @test occursin("Error: project_dir parameter is required", result)
+
+                MCPRepl.stop_mcp_server(server)
+                MCPRepl.remove_pid_file(test_dir)
+            finally
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Multiplexer MCP Request Processing" begin
+            # Test initialize
+            request = Dict("jsonrpc" => "2.0", "id" => 1, "method" => "initialize")
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+
+            @test response["jsonrpc"] == "2.0"
+            @test response["id"] == 1
+            @test response["result"]["protocolVersion"] == "2024-11-05"
+            @test response["result"]["serverInfo"]["name"] == "julia-mcp-adapter"
+
+            # Test notifications/initialized (should return nothing)
+            request = Dict("jsonrpc" => "2.0", "method" => "notifications/initialized")
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+            @test isnothing(response)
+
+            # Test tools/list
+            request = Dict("jsonrpc" => "2.0", "id" => 2, "method" => "tools/list")
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+            @test haskey(response["result"], "tools")
+            @test length(response["result"]["tools"]) == 4
+            tool_names = [t["name"] for t in response["result"]["tools"]]
+            @test "exec_repl" in tool_names
+            @test "investigate_environment" in tool_names
+            @test "usage_instructions" in tool_names
+            @test "remove-trailing-whitespace" in tool_names
+
+            # Test invalid method
+            request = Dict("jsonrpc" => "2.0", "id" => 3, "method" => "invalid/method")
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+            @test haskey(response, "error")
+            @test response["error"]["code"] == -32601
         end
     end
 end

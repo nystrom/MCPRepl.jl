@@ -6,18 +6,41 @@ struct MCPTool
     handler::Function
 end
 
-# Server with tool registry supporting both HTTP and socket modes
-mutable struct MCPServer
-    mode::Symbol  # :http or :socket
-    # HTTP mode fields
-    port::Union{Int,Nothing}
-    http_server::Union{HTTP.Server,Nothing}
-    # Socket mode fields
-    socket_path::Union{String,Nothing}
-    socket_server::Union{Sockets.PipeServer,Nothing}
-    # Common fields
+# Configuration types
+abstract type ServerConfig end
+
+struct HttpConfig <: ServerConfig
+    port::Int
+    verbose::Bool
+end
+
+HttpConfig(port::Int) = HttpConfig(port, true)
+
+struct SocketConfig <: ServerConfig
+    socket_path::String
+    verbose::Bool
+end
+
+SocketConfig(socket_path::String) = SocketConfig(socket_path, true)
+
+# Server handle types
+abstract type ServerHandle end
+
+mutable struct HttpServerHandle <: ServerHandle
+    port::Int
+    http_server::HTTP.Server
+end
+
+mutable struct SocketServerHandle <: ServerHandle
+    socket_path::String
+    socket_server::Sockets.PipeServer
     running::Bool
     client_tasks::Vector{Task}
+end
+
+# Server with tool registry supporting both HTTP and socket modes
+mutable struct MCPServer
+    handle::ServerHandle
     tools::Dict{String,MCPTool}
 end
 
@@ -322,21 +345,17 @@ end
 
 const MAX_CLIENTS = 10
 
-function start_mcp_server(tools::Vector{MCPTool};
-                         mode::Symbol=:http,
-                         port::Int=3000,
-                         socket_path::Union{String,Nothing}=nothing,
-                         verbose::Bool=true)
+function start_mcp_server(tools::Vector{MCPTool}, config::ServerConfig)
     tools_dict = Dict(tool.name => tool for tool in tools)
 
-    if mode == :http
+    if config isa HttpConfig
         # HTTP mode
-        handler = create_handler(tools_dict, port)
+        handler = create_handler(tools_dict, config.port)
 
         # Suppress HTTP server logging
-        http_server = HTTP.serve!(handler, port; verbose=false)
+        http_server = HTTP.serve!(handler, config.port; verbose=false)
 
-        if verbose
+        if config.verbose
             # Check MCP status and show contextual message
             claude_status = MCPRepl.check_claude_status()
             gemini_status = MCPRepl.check_gemini_status()
@@ -374,98 +393,118 @@ function start_mcp_server(tools::Vector{MCPTool};
             end
 
             println()
-            println("🚀 MCP Server running on port $port with $(length(tools)) tools")
+            println("🚀 MCP Server running on port $(config.port) with $(length(tools)) tools")
             println()
         else
-            println("MCP Server running on port $port with $(length(tools)) tools")
+            println("MCP Server running on port $(config.port) with $(length(tools)) tools")
         end
 
-        return MCPServer(:http, port, http_server, nothing, nothing, true, Task[], tools_dict)
+        handle = HttpServerHandle(config.port, http_server)
+        return MCPServer(handle, tools_dict)
 
-    elseif mode == :socket
+    elseif config isa SocketConfig
         # Socket mode
-        if isnothing(socket_path)
-            error("socket_path is required for socket mode")
-        end
-
         # Remove existing socket if present
-        ispath(socket_path) && rm(socket_path)
+        ispath(config.socket_path) && rm(config.socket_path)
 
-        socket_server = Sockets.listen(socket_path)
-        mcp_server = MCPServer(:socket, nothing, nothing, socket_path, socket_server, true, Task[], tools_dict)
+        socket_server = Sockets.listen(config.socket_path)
+
+        # Set restrictive permissions on socket (owner read/write only)
+        chmod(config.socket_path, 0o600)
+
+        handle = SocketServerHandle(config.socket_path, socket_server, true, Task[])
+        mcp_server = MCPServer(handle, tools_dict)
 
         # Start accepting clients in background
         @async begin
-            while mcp_server.running
+            while handle.running
                 try
                     client = accept(socket_server)
 
                     # Clean up completed tasks before adding new one
-                    filter!(t -> !istaskdone(t), mcp_server.client_tasks)
+                    filter!(t -> !istaskdone(t), handle.client_tasks)
 
                     # Check client limit
-                    if length(mcp_server.client_tasks) >= MAX_CLIENTS
+                    if length(handle.client_tasks) >= MAX_CLIENTS
                         printstyled("\nMCP Server: max clients ($MAX_CLIENTS) reached, rejecting connection\n", color=:yellow)
                         close(client)
                         continue
                     end
 
                     task = @async handle_socket_client(client, tools_dict)
-                    push!(mcp_server.client_tasks, task)
+                    push!(handle.client_tasks, task)
                 catch e
-                    if mcp_server.running && !(e isa Base.IOError)
+                    if handle.running && !(e isa Base.IOError)
                         printstyled("\nMCP Server accept error: $e\n", color=:red)
                     end
                 end
             end
         end
 
-        if verbose
-            println("🚀 MCP Server running on $socket_path with $(length(tools)) tools")
+        if config.verbose
+            println("🚀 MCP Server running on $(config.socket_path) with $(length(tools)) tools")
             println()
         else
-            println("MCP Server running on $socket_path with $(length(tools)) tools")
+            println("MCP Server running on $(config.socket_path) with $(length(tools)) tools")
         end
 
         return mcp_server
 
     else
-        error("Invalid mode: $mode (must be :http or :socket)")
+        error("Invalid config type: $(typeof(config))")
     end
 end
 
-function stop_mcp_server(server::MCPServer)
-    if server.mode == :http
-        # HTTP mode
-        if !isnothing(server.http_server)
-            HTTP.close(server.http_server)
+# Backward compatibility wrapper
+function start_mcp_server(tools::Vector{MCPTool};
+                         mode::Symbol=:http,
+                         port::Int=3000,
+                         socket_path::Union{String,Nothing}=nothing,
+                         verbose::Bool=true)
+    if mode == :http
+        config = HttpConfig(port, verbose)
+    elseif mode == :socket
+        if isnothing(socket_path)
+            error("socket_path is required for socket mode")
         end
-    elseif server.mode == :socket
+        config = SocketConfig(socket_path, verbose)
+    else
+        error("Invalid mode: $mode (must be :http or :socket)")
+    end
+
+    return start_mcp_server(tools, config)
+end
+
+function stop_mcp_server(server::MCPServer)
+    if server.handle isa HttpServerHandle
+        # HTTP mode
+        HTTP.close(server.handle.http_server)
+
+    elseif server.handle isa SocketServerHandle
         # Socket mode
-        server.running = false
+        server.handle.running = false
 
         # Close the server socket
-        if !isnothing(server.socket_server)
-            try
-                close(server.socket_server)
-            catch
-            end
+        try
+            close(server.handle.socket_server)
+        catch
         end
 
         # Wait for client tasks to finish
-        for task in server.client_tasks
+        for task in server.handle.client_tasks
             try
                 wait(task)
             catch
             end
         end
-        empty!(server.client_tasks)
+        empty!(server.handle.client_tasks)
 
         # Remove socket
-        if !isnothing(server.socket_path) && ispath(server.socket_path)
-            rm(server.socket_path)
+        if ispath(server.handle.socket_path)
+            rm(server.handle.socket_path)
         end
     end
 
     println("MCP Server stopped")
+    return nothing
 end
