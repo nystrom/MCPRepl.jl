@@ -29,23 +29,34 @@ or
 pkg> dev https://github.com/hexaeder/MCPRepl.jl
 ```
 
+## Quick Setup
+
+The easiest way to configure MCPRepl for your AI client is using the interactive setup:
+
+```julia
+using MCPRepl
+MCPRepl.setup()
+```
+
+This will detect available clients (Claude Code, Gemini CLI) and guide you through configuration options.
+
 ## Usage
 
 MCPRepl.jl supports two modes of operation:
 
 1. **HTTP Mode (Simple, Default)**: Single REPL server on port 3000
-2. **Socket Mode (Advanced)**: Multiple REPL servers with multiplexer routing
+2. **Multiplexer Mode (Advanced)**: Multiple REPL servers with multiplexer routing
 
 ### HTTP Mode (Recommended for Single Project)
 
-HTTP mode is simpler and suitable when working in one Julia project.
+HTTP mode is simpler and suitable when working in one Julia project. In this mode, tools do **not** require a `project_dir` parameter.
 
 **Start the server:**
 
 ```julia-repl
 julia> using MCPRepl
 julia> MCPRepl.start!()
-🚀 MCP Server running on port 3000 with 4 tools
+MCP Server running on port 3000 with 4 tools
 ```
 
 **Configure Claude Code:**
@@ -70,22 +81,22 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 }
 ```
 
-### Socket Mode (Advanced, Multi-Project)
+### Multiplexer Mode (Advanced, Multi-Project)
 
-Socket mode uses Unix sockets and a multiplexer to route requests to multiple Julia REPL servers running in different project directories.
+Multiplexer mode uses Unix sockets and a multiplexer to route requests to multiple Julia REPL servers running in different project directories. In this mode, tools **require** a `project_dir` parameter to identify which server to route to.
 
 **Start REPL servers in each project:**
 
 ```julia-repl
 # In project 1
 julia> using MCPRepl
-julia> MCPRepl.start!(use_socket=true)
-🚀 MCP Server running on /path/to/project1/.mcp-repl.sock with 4 tools
+julia> MCPRepl.start!(multiplex=true)
+MCP Server running on /path/to/project1/.mcp-repl.sock with 4 tools
 
 # In project 2
 julia> using MCPRepl
-julia> MCPRepl.start!(use_socket=true)
-🚀 MCP Server running on /path/to/project2/.mcp-repl.sock with 4 tools
+julia> MCPRepl.start!(multiplex=true)
+MCP Server running on /path/to/project2/.mcp-repl.sock with 4 tools
 ```
 
 This creates a Unix socket file (`.mcp-repl.sock`) and PID file (`.mcp-repl.pid`) in each project directory.
@@ -139,16 +150,17 @@ Add to `~/.config/gemini/mcp_config.json`:
 
 ### Using the Tools
 
-**HTTP Mode tools:**
+**HTTP Mode tools** (no `project_dir` needed):
 - **`exec_repl(expression)`**: Execute Julia code in the REPL
 - **`investigate_environment()`**: Get information about packages and environment
 - **`usage_instructions()`**: Get best practices for using the REPL
 - **`remove-trailing-whitespace(file_path)`**: Clean up trailing whitespace in files
 
-**Socket Mode tools** (require `project_dir` parameter):
+**Multiplexer Mode tools** (require `project_dir` parameter):
 - **`exec_repl(project_dir, expression)`**: Execute Julia code in the REPL
 - **`investigate_environment(project_dir)`**: Get information about packages and environment
 - **`usage_instructions(project_dir)`**: Get best practices for using the REPL
+- **`remove-trailing-whitespace(project_dir, file_path)`**: Clean up trailing whitespace in files
 
 The `project_dir` parameter tells the multiplexer where to find the Julia server socket (by walking up from that directory to find `.mcp-repl.sock`).
 
