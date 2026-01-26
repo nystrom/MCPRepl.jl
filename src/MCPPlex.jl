@@ -105,10 +105,12 @@ function with_timeout(f, timeout::Float64)
 
     if timedwait(() -> istaskdone(task), timeout) == :timed_out
         try
-            Base.throwto(task, ErrorException("Operation timed out after $timeout seconds"))
+            Base.throwto(task, InterruptException())
         catch
         end
-        wait(task)
+        # Give task brief moment to handle interrupt, but don't wait indefinitely
+        timedwait(() -> istaskdone(task), 1.0)
+        # Throw error regardless of whether task completed
         error("Operation timed out after $timeout seconds")
     end
 
@@ -495,10 +497,23 @@ function run_stdio_mode()
             end
         end
     finally
-        # Wait for all active tasks to complete
+        # Wait for all active tasks to complete with timeout to prevent deadlock
         for task in active_tasks
             try
-                wait(task)
+                if timedwait(() -> istaskdone(task), 5.0) == :timed_out
+                    try
+                        Base.throwto(task, InterruptException())
+                    catch
+                    end
+                    # Give brief moment for cleanup, but don't wait indefinitely
+                    timedwait(() -> istaskdone(task), 1.0)
+                else
+                    # Task completed, fetch to handle any exceptions
+                    try
+                        fetch(task)
+                    catch
+                    end
+                end
             catch
             end
         end

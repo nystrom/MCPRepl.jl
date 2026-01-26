@@ -148,11 +148,25 @@ function process_jsonrpc_request(request::Dict{String,Any}, tools::Dict{String,M
     )
 end
 
+# Socket read timeout in seconds
+const SOCKET_READ_TIMEOUT = 60.0
+
 # Handle a single socket client connection
 function handle_socket_client(client::IO, tools::Dict{String,MCPTool})
     try
         while isopen(client)
-            line = readline(client)
+            # Read with timeout to prevent indefinite blocking
+            read_task = @async readline(client)
+            if timedwait(() -> istaskdone(read_task), SOCKET_READ_TIMEOUT) == :timed_out
+                printstyled("\nMCP Server: client read timeout, closing connection\n", color=:yellow)
+                try
+                    Base.throwto(read_task, InterruptException())
+                catch
+                end
+                break
+            end
+
+            line = fetch(read_task)
             isempty(line) && continue
 
             request_id = 0
@@ -475,6 +489,8 @@ function start_mcp_server(tools::Vector{MCPTool};
     return start_mcp_server(tools, config)
 end
 
+const SHUTDOWN_TASK_TIMEOUT = 5.0
+
 function stop_mcp_server(server::MCPServer)
     if server.handle isa HttpServerHandle
         # HTTP mode
@@ -490,10 +506,23 @@ function stop_mcp_server(server::MCPServer)
         catch
         end
 
-        # Wait for client tasks to finish
+        # Wait for client tasks to finish with timeout to prevent deadlock
         for task in server.handle.client_tasks
             try
-                wait(task)
+                if timedwait(() -> istaskdone(task), SHUTDOWN_TASK_TIMEOUT) == :timed_out
+                    printstyled("Warning: Client task did not complete within $(SHUTDOWN_TASK_TIMEOUT)s, forcing shutdown\n", color=:yellow)
+                    try
+                        Base.throwto(task, InterruptException())
+                    catch
+                    end
+                    # Don't wait again - just continue shutdown
+                else
+                    # Task completed, fetch to handle any exceptions
+                    try
+                        fetch(task)
+                    catch
+                    end
+                end
             catch
             end
         end
