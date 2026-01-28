@@ -15,6 +15,24 @@ using REPL
 # Note: Main.Pkg must be available at runtime
 
 #==============================================================================#
+# Version Compatibility Helpers
+#==============================================================================#
+
+"""
+    repl_eval_backend(expr, backend)
+
+Evaluate an expression on the REPL backend.
+Uses eval_on_backend (Julia 1.12+) or eval_with_backend (earlier versions).
+"""
+function repl_eval_backend(expr, backend)
+    if VERSION >= v"1.12"
+        return REPL.eval_on_backend(expr, backend)
+    else
+        return REPL.eval_with_backend(expr, backend)
+    end
+end
+
+#==============================================================================#
 # Tool Definitions
 #==============================================================================#
 
@@ -243,7 +261,7 @@ function execute_repllike(str)
     captured_output = Pipe()
     response = redirect_stdout(captured_output) do
         redirect_stderr(captured_output) do
-            r = REPL.eval_on_backend(expr, backend)
+            r = repl_eval_backend(expr, backend)
             close(Base.pipe_writer(captured_output))
             return r
         end
