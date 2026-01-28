@@ -755,5 +755,133 @@ using Sockets
             @test haskey(response, "error")
             @test response["error"]["code"] == -32601
         end
+
+        @testset "Multiplexer Dict Type Safety" begin
+            # Test tool call with missing params field (triggers default Dict())
+            request = Dict{String,Any}(
+                "jsonrpc" => "2.0",
+                "id" => 1,
+                "method" => "tools/call"
+            )
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+            @test haskey(response, "error")
+            @test response["error"]["code"] == -32602
+
+            # Test tool call with missing arguments field (triggers default Dict())
+            # Handler receives empty Dict{String,Any} and returns error message as text
+            request = Dict{String,Any}(
+                "jsonrpc" => "2.0",
+                "id" => 2,
+                "method" => "tools/call",
+                "params" => Dict{String,Any}(
+                    "name" => "exec_repl"
+                )
+            )
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+            @test haskey(response, "result")
+            @test haskey(response["result"], "content")
+            @test occursin("project_dir parameter is required", response["result"]["content"][1]["text"])
+
+            # Test tool call with empty arguments (ensures Dict{String,Any} is used)
+            request = Dict{String,Any}(
+                "jsonrpc" => "2.0",
+                "id" => 3,
+                "method" => "tools/call",
+                "params" => Dict{String,Any}(
+                    "name" => "usage_instructions",
+                    "arguments" => Dict{String,Any}()
+                )
+            )
+            response = MCPRepl.MCPPlex.process_mcp_request(request)
+            @test haskey(response, "result")
+            @test haskey(response["result"], "content")
+            @test occursin("project_dir parameter is required", response["result"]["content"][1]["text"])
+
+            # Test handler functions directly with Dict{String,Any}
+            result = MCPRepl.MCPPlex.handle_exec_repl(Dict{String,Any}())
+            @test occursin("Error: project_dir parameter is required", result)
+
+            result = MCPRepl.MCPPlex.handle_investigate_environment(Dict{String,Any}())
+            @test occursin("Error: project_dir parameter is required", result)
+
+            result = MCPRepl.MCPPlex.handle_usage_instructions(Dict{String,Any}())
+            @test occursin("Error: project_dir parameter is required", result)
+
+            result = MCPRepl.MCPPlex.handle_remove_trailing_whitespace(Dict{String,Any}())
+            @test occursin("Error: project_dir parameter is required", result)
+        end
+
+        @testset "Socket Server Dict Type Safety" begin
+            test_dir = mktempdir()
+            socket_path = joinpath(test_dir, ".mcp-repl.sock")
+
+            echo_tool = MCPTool(
+                "echo",
+                "Echo text",
+                MCPRepl.text_parameter("text", "Text to echo"),
+                args -> get(args, "text", "")
+            )
+
+            try
+                server = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket_path, verbose=false)
+                sleep(0.1)
+
+                client = connect(socket_path)
+
+                try
+                    # Test tool call with missing params
+                    request = Dict{String,Any}(
+                        "jsonrpc" => "2.0",
+                        "id" => 1,
+                        "method" => "tools/call"
+                    )
+                    println(client, JSON3.write(request))
+                    response_line = readline(client)
+                    response = JSON3.read(response_line, Dict{String,Any})
+
+                    @test haskey(response, "error")
+                    @test response["error"]["code"] == -32602
+
+                    # Test tool call with missing arguments
+                    request = Dict{String,Any}(
+                        "jsonrpc" => "2.0",
+                        "id" => 2,
+                        "method" => "tools/call",
+                        "params" => Dict{String,Any}(
+                            "name" => "echo"
+                        )
+                    )
+                    println(client, JSON3.write(request))
+                    response_line = readline(client)
+                    response = JSON3.read(response_line, Dict{String,Any})
+
+                    @test haskey(response, "result")
+                    @test response["result"]["content"][1]["text"] == ""
+
+                    # Test tool call with empty arguments
+                    request = Dict{String,Any}(
+                        "jsonrpc" => "2.0",
+                        "id" => 3,
+                        "method" => "tools/call",
+                        "params" => Dict{String,Any}(
+                            "name" => "echo",
+                            "arguments" => Dict{String,Any}()
+                        )
+                    )
+                    println(client, JSON3.write(request))
+                    response_line = readline(client)
+                    response = JSON3.read(response_line, Dict{String,Any})
+
+                    @test haskey(response, "result")
+                    @test response["result"]["content"][1]["text"] == ""
+                finally
+                    close(client)
+                end
+
+                MCPRepl.stop_mcp_server(server)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
     end
 end

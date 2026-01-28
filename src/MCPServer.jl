@@ -104,11 +104,11 @@ function process_jsonrpc_request(request::Dict{String,Any}, tools::Dict{String,M
 
     # Handle tool calls
     if method == "tools/call"
-        params = get(request, "params", Dict())
+        params = get(request, "params", Dict{String,Any}())
         tool_name = get(params, "name", "")
         if haskey(tools, tool_name)
             tool = tools[tool_name]
-            args = get(params, "arguments", Dict())
+            args = get(params, "arguments", Dict{String,Any}())
 
             # Call the tool handler
             result_text = tool.handler(args)

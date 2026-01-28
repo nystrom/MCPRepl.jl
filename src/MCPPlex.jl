@@ -283,7 +283,7 @@ function handle_exec_repl(args::Dict{String,Any})
         return "Error: expression parameter is required"
     end
 
-    return forward_to_julia_server("exec_repl", project_dir, Dict("expression" => expression), true)
+    return forward_to_julia_server("exec_repl", project_dir, Dict{String,Any}("expression" => expression), true)
 end
 
 """
@@ -336,7 +336,7 @@ function handle_remove_trailing_whitespace(args::Dict{String,Any})
         return "Error: file_path parameter is required"
     end
 
-    return forward_to_julia_server("remove-trailing-whitespace", project_dir, Dict("file_path" => file_path), false)
+    return forward_to_julia_server("remove-trailing-whitespace", project_dir, Dict{String,Any}("file_path" => file_path), false)
 end
 
 #==============================================================================#
@@ -415,9 +415,9 @@ function process_mcp_request(request::Dict)
 
     # Handle tool calls
     if method == "tools/call"
-        params = get(request, "params", Dict())
+        params = get(request, "params", Dict{String,Any}())
         tool_name = get(params, "name", "")
-        args = get(params, "arguments", Dict())
+        args = get(params, "arguments", Dict{String,Any}())
 
         # Find tool handler
         if !haskey(TOOL_HANDLERS, tool_name)
