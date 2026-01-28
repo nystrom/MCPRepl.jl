@@ -342,52 +342,15 @@ using Sockets
             end
         end
 
-        @testset "PID File Management" begin
-            test_dir = mktempdir()
-            socket_path = joinpath(test_dir, ".mcp-repl.sock")
-            pid_path = joinpath(test_dir, ".mcp-repl.pid")
-
-            try
-                # Start socket server
-                server = MCPRepl.start_mcp_server(tools; mode=:socket, socket_path=socket_path, verbose=false)
-                sleep(0.1)
-
-                # Write PID file
-                MCPRepl.write_pid_file(test_dir)
-
-                # Verify PID file exists and contains current PID
-                @test isfile(pid_path)
-                pid_content = strip(read(pid_path, String))
-                @test parse(Int, pid_content) == getpid()
-
-                # Stop server and cleanup
-                MCPRepl.stop_mcp_server(server)
-                MCPRepl.remove_pid_file(test_dir)
-
-                # Verify PID file is removed
-                @test !isfile(pid_path)
-            finally
-                rm(test_dir; recursive=true, force=true)
-            end
-        end
-
         @testset "Stale Server Detection" begin
             test_dir = mktempdir()
             socket_path = joinpath(test_dir, ".mcp-repl.sock")
-            pid_path = joinpath(test_dir, ".mcp-repl.pid")
 
             try
-                # Create stale PID file with non-existent PID
-                write(pid_path, "999999")
-
-                # check_existing_server should detect stale server and clean up
-                @test MCPRepl.check_existing_server(test_dir) == false
-                @test !isfile(pid_path)
-
-                # Create stale socket file without PID
+                # Create stale socket file (no server listening)
                 touch(socket_path)
 
-                # check_existing_server should clean up orphaned socket
+                # check_existing_server should detect stale socket and clean up
                 @test MCPRepl.check_existing_server(test_dir) == false
                 @test !ispath(socket_path)
             finally
@@ -398,22 +361,17 @@ using Sockets
         @testset "Duplicate Server Prevention" begin
             test_dir = mktempdir()
             socket_path = joinpath(test_dir, ".mcp-repl.sock")
-            pid_path = joinpath(test_dir, ".mcp-repl.pid")
 
             try
                 # Start first server
                 server = MCPRepl.start_mcp_server(tools; mode=:socket, socket_path=socket_path, verbose=false)
                 sleep(0.1)
 
-                # Write PID file
-                MCPRepl.write_pid_file(test_dir)
-
-                # Verify server is detected as running
+                # Verify server is detected as running via socket ping
                 @test MCPRepl.check_existing_server(test_dir) == true
 
                 # Stop server
                 MCPRepl.stop_mcp_server(server)
-                MCPRepl.remove_pid_file(test_dir)
                 MCPRepl.remove_socket_file(test_dir)
             finally
                 rm(test_dir; recursive=true, force=true)
@@ -480,17 +438,9 @@ using Sockets
                 socket_path = MCPRepl.get_socket_path(test_dir)
                 @test socket_path == joinpath(test_dir, ".mcp-repl.sock")
 
-                # Test get_pid_path
-                pid_path = MCPRepl.get_pid_path(test_dir)
-                @test pid_path == joinpath(test_dir, ".mcp-repl.pid")
-
                 # Test remove_socket_file with non-existent file
                 MCPRepl.remove_socket_file(test_dir)
                 @test !ispath(socket_path)
-
-                # Test remove_pid_file with non-existent file
-                MCPRepl.remove_pid_file(test_dir)
-                @test !isfile(pid_path)
             finally
                 rm(test_dir; recursive=true, force=true)
             end
@@ -580,25 +530,26 @@ using Sockets
             test_dir = mktempdir()
             try
                 socket_path = joinpath(test_dir, ".mcp-repl.sock")
-                pid_path = joinpath(test_dir, ".mcp-repl.pid")
 
-                # No PID file
+                # No socket file
                 @test !MCPRepl.MCPPlex.check_server_running(socket_path)
 
-                # Invalid PID
-                write(pid_path, "not_a_number")
+                # Stale socket (file exists but no server listening)
+                touch(socket_path)
                 @test !MCPRepl.MCPPlex.check_server_running(socket_path)
-                rm(pid_path)
 
-                # Stale PID
-                write(pid_path, "999999")
-                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
-                rm(pid_path)
-
-                # Valid PID (current process)
-                write(pid_path, string(getpid()))
+                # Active server
+                rm(socket_path; force=true)
+                echo_tool = MCPTool(
+                    "echo",
+                    "Echo text",
+                    MCPRepl.text_parameter("text", "Text"),
+                    args -> get(args, "text", "")
+                )
+                server = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket_path, verbose=false)
+                sleep(0.1)
                 @test MCPRepl.MCPPlex.check_server_running(socket_path)
-                rm(pid_path)
+                MCPRepl.stop_mcp_server(server)
             finally
                 rm(test_dir; recursive=true, force=true)
             end
@@ -627,13 +578,11 @@ using Sockets
                 # Start server in proj1
                 socket1 = joinpath(proj1_dir, ".mcp-repl.sock")
                 server1 = MCPRepl.start_mcp_server([time_tool]; mode=:socket, socket_path=socket1, verbose=false)
-                MCPRepl.write_pid_file(proj1_dir)
                 sleep(0.1)
 
                 # Start server in proj2
                 socket2 = joinpath(proj2_dir, ".mcp-repl.sock")
                 server2 = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket2, verbose=false)
-                MCPRepl.write_pid_file(proj2_dir)
                 sleep(0.1)
 
                 # Test forwarding to proj1
@@ -647,8 +596,6 @@ using Sockets
                 # Stop servers
                 MCPRepl.stop_mcp_server(server1)
                 MCPRepl.stop_mcp_server(server2)
-                MCPRepl.remove_pid_file(proj1_dir)
-                MCPRepl.remove_pid_file(proj2_dir)
             finally
                 rm(proj1_dir; recursive=true, force=true)
                 rm(proj2_dir; recursive=true, force=true)
@@ -664,11 +611,9 @@ using Sockets
                 @test occursin("Error: MCP REPL server not found", result)
                 @test occursin("Start the server with", result)
 
-                # Test with stale server (socket exists but process dead)
+                # Test with stale server (socket exists but no server responding)
                 socket_path = joinpath(test_dir, ".mcp-repl.sock")
-                pid_path = joinpath(test_dir, ".mcp-repl.pid")
                 touch(socket_path)
-                write(pid_path, "999999")
 
                 # Clear cache so it finds the socket we just created
                 delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
@@ -676,8 +621,7 @@ using Sockets
                 result = MCPRepl.MCPPlex.forward_to_julia_server("some_tool", test_dir, Dict{String,Any}(), true)
                 @test occursin("Error: MCP REPL server not running", result)
 
-                rm(socket_path)
-                rm(pid_path)
+                rm(socket_path; force=true)
             finally
                 delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
                 rm(test_dir; recursive=true, force=true)
@@ -697,7 +641,6 @@ using Sockets
 
             try
                 server = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket_path, verbose=false)
-                MCPRepl.write_pid_file(test_dir)
                 sleep(0.1)
 
                 # Test handle_exec_repl (would need actual REPL tools)
@@ -716,7 +659,6 @@ using Sockets
                 @test occursin("Error: project_dir parameter is required", result)
 
                 MCPRepl.stop_mcp_server(server)
-                MCPRepl.remove_pid_file(test_dir)
             finally
                 delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(test_dir))
                 rm(test_dir; recursive=true, force=true)

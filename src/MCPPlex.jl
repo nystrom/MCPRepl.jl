@@ -26,7 +26,6 @@ using HTTP
 using ..Tools: TOOL_DEFINITIONS, make_tool_schema, get_tool_description, get_tool_names
 
 const SOCKET_NAME = ".mcp-repl.sock"
-const PID_NAME = ".mcp-repl.pid"
 const MCP_PROTOCOL_VERSION = "2024-11-05"
 
 # NOTE: SOCKET_CACHE is not thread-safe. This multiplexer assumes single-threaded
@@ -74,20 +73,25 @@ end
 """
     check_server_running(socket_path::String) -> Bool
 
-Check if the MCP server is running by verifying the PID file.
-Returns true if server appears to be running, false otherwise.
+Check if the MCP server is running by attempting to connect to the socket
+and sending a lightweight tools/list request.
+Returns true if server responds, false otherwise.
 """
 function check_server_running(socket_path::String)
-    pid_path = joinpath(dirname(socket_path), PID_NAME)
-
-    if !ispath(pid_path)
-        return false
-    end
+    !ispath(socket_path) && return false
 
     try
-        pid = parse(Int, strip(read(pid_path, String)))
-        # Check if process exists (doesn't require signal permission)
-        return success(pipeline(`ps -p $pid`, stdout=devnull, stderr=devnull))
+        sock = connect(socket_path)
+        request = Dict(
+            "jsonrpc" => "2.0",
+            "id" => 0,
+            "method" => "tools/list",
+            "params" => Dict{String,Any}()
+        )
+        println(sock, JSON3.write(request))
+        response_line = readline(sock)
+        close(sock)
+        return !isempty(response_line)
     catch
         return false
     end
