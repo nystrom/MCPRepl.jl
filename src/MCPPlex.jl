@@ -299,7 +299,7 @@ function handle_investigate_environment(args::Dict{String,Any})
         return "Error: project_dir parameter is required"
     end
 
-    return forward_to_julia_server("investigate_environment", project_dir, Dict(), false)
+    return forward_to_julia_server("investigate_environment", project_dir, Dict{String,Any}(), false)
 end
 
 """
@@ -315,7 +315,7 @@ function handle_usage_instructions(args::Dict{String,Any})
         return "Error: project_dir parameter is required"
     end
 
-    return forward_to_julia_server("usage_instructions", project_dir, Dict(), false)
+    return forward_to_julia_server("usage_instructions", project_dir, Dict{String,Any}(), false)
 end
 
 """
