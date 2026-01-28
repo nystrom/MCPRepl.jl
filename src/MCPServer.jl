@@ -180,7 +180,7 @@ function handle_socket_client(client::IO, tools::Dict{String,MCPTool})
                     println(client, JSON3.write(response))
                 end
             catch e
-                if e isa EOFError
+                if e isa EOFError || e isa Base.IOError
                     break
                 end
 
@@ -194,7 +194,11 @@ function handle_socket_client(client::IO, tools::Dict{String,MCPTool})
                         "message" => "Internal error: $e"
                     )
                 )
-                println(client, JSON3.write(error_response))
+                try
+                    println(client, JSON3.write(error_response))
+                catch
+                    break
+                end
             end
         end
     catch e
