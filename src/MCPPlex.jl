@@ -86,8 +86,8 @@ function check_server_running(socket_path::String)
 
     try
         pid = parse(Int, strip(read(pid_path, String)))
-        # Check if process exists (Unix systems)
-        return success(pipeline(`kill -0 $pid`, stderr=devnull))
+        # Check if process exists (doesn't require signal permission)
+        return success(pipeline(`ps -p $pid`, stdout=devnull, stderr=devnull))
     catch
         return false
     end

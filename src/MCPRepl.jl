@@ -140,12 +140,10 @@ function check_existing_server(socket_dir::String=get_project_dir())
         return false
     end
 
-    # Check if process is alive (signal 0 tests existence)
-    try
-        run(pipeline(`kill -0 $pid`, stderr=devnull))
-        # Process exists, server is running
+    # Check if process is alive using ps (doesn't require signal permission)
+    if success(pipeline(`ps -p $pid`, stdout=devnull, stderr=devnull))
         return true
-    catch
+    else
         # Process is dead, clean up stale files
         remove_pid_file(socket_dir)
         remove_socket_file(socket_dir)
