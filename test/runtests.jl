@@ -365,14 +365,108 @@ using Sockets
             try
                 # Start first server
                 server = MCPRepl.start_mcp_server(tools; mode=:socket, socket_path=socket_path, verbose=false)
+                MCPRepl.write_pid_file(test_dir)
                 sleep(0.1)
 
-                # Verify server is detected as running via socket ping
+                # Verify server is detected as running via PID file
                 @test MCPRepl.check_existing_server(test_dir) == true
 
-                # Stop server
+                # Stop server (cleans up socket and PID files)
                 MCPRepl.stop_mcp_server(server)
-                MCPRepl.remove_socket_file(test_dir)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "PID File Management" begin
+            test_dir = mktempdir()
+            socket_path = joinpath(test_dir, ".mcp-repl.sock")
+            pid_file = MCPRepl.get_pid_file_path(test_dir)
+
+            try
+                # Test PID file path generation
+                @test endswith(pid_file, ".mcp-repl.pid")
+                @test dirname(pid_file) == test_dir
+
+                # Test write_pid_file creates file with correct PID
+                MCPRepl.write_pid_file(test_dir)
+                @test ispath(pid_file)
+                @test strip(read(pid_file, String)) == string(getpid())
+
+                # Test remove_pid_file removes the file
+                MCPRepl.remove_pid_file(test_dir)
+                @test !ispath(pid_file)
+
+                # Test remove_pid_file is safe when file doesn't exist
+                MCPRepl.remove_pid_file(test_dir)
+                @test !ispath(pid_file)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "PID File Creation on Server Start" begin
+            test_dir = mktempdir()
+            socket_path = joinpath(test_dir, ".mcp-repl.sock")
+            pid_file = MCPRepl.get_pid_file_path(test_dir)
+
+            try
+                # Start server in socket mode
+                server = MCPRepl.start_mcp_server(tools; mode=:socket, socket_path=socket_path, verbose=false)
+                sleep(0.1)
+
+                # Manually write PID file (simulating what start!() does)
+                MCPRepl.write_pid_file(test_dir)
+
+                # Verify PID file exists and contains current process PID
+                @test ispath(pid_file)
+                pid_str = strip(read(pid_file, String))
+                @test pid_str == string(getpid())
+
+                # Stop server should clean up PID file
+                MCPRepl.stop_mcp_server(server)
+                @test !ispath(pid_file)
+                @test !ispath(socket_path)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Stale PID File Cleanup" begin
+            test_dir = mktempdir()
+            socket_path = joinpath(test_dir, ".mcp-repl.sock")
+            pid_file = MCPRepl.get_pid_file_path(test_dir)
+
+            try
+                # Create stale socket and PID file with non-existent process
+                touch(socket_path)
+                write(pid_file, "99999")
+
+                # check_existing_server should detect stale files and clean up
+                @test MCPRepl.check_existing_server(test_dir) == false
+                @test !ispath(socket_path)
+                @test !ispath(pid_file)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "PID File with Valid Process" begin
+            test_dir = mktempdir()
+            socket_path = joinpath(test_dir, ".mcp-repl.sock")
+            pid_file = MCPRepl.get_pid_file_path(test_dir)
+
+            try
+                # Create socket and PID file with current process (valid)
+                touch(socket_path)
+                write(pid_file, string(getpid()))
+
+                # check_existing_server should detect running process
+                @test MCPRepl.check_existing_server(test_dir) == true
+
+                # Files should not be cleaned up
+                @test ispath(socket_path)
+                @test ispath(pid_file)
             finally
                 rm(test_dir; recursive=true, force=true)
             end
@@ -530,16 +624,22 @@ using Sockets
             test_dir = mktempdir()
             try
                 socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                pid_file = MCPRepl.get_pid_file_path(test_dir)
 
                 # No socket file
                 @test !MCPRepl.MCPPlex.check_server_running(socket_path)
 
-                # Stale socket (file exists but no server listening)
+                # Stale socket (file exists but no PID file)
                 touch(socket_path)
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Stale PID file (socket exists, PID file exists, but process doesn't exist)
+                write(pid_file, "99999")
                 @test !MCPRepl.MCPPlex.check_server_running(socket_path)
 
                 # Active server
                 rm(socket_path; force=true)
+                rm(pid_file; force=true)
                 echo_tool = MCPTool(
                     "echo",
                     "Echo text",
@@ -547,9 +647,60 @@ using Sockets
                     args -> get(args, "text", "")
                 )
                 server = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket_path, verbose=false)
+                write(pid_file, string(getpid()))
                 sleep(0.1)
                 @test MCPRepl.MCPPlex.check_server_running(socket_path)
                 MCPRepl.stop_mcp_server(server)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Multiplexer PID File Validation" begin
+            test_dir = mktempdir()
+            try
+                socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                pid_file = MCPRepl.get_pid_file_path(test_dir)
+
+                # Test with corrupted PID file (non-numeric content)
+                touch(socket_path)
+                write(pid_file, "not-a-number")
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Test with empty PID file
+                write(pid_file, "")
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Test with whitespace-only PID file
+                write(pid_file, "   \n  ")
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Test with very high PID (unlikely to exist)
+                write(pid_file, string(typemax(Int32)))
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
+            finally
+                rm(test_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Multiplexer PID File Process Checking" begin
+            test_dir = mktempdir()
+            try
+                socket_path = joinpath(test_dir, ".mcp-repl.sock")
+                pid_file = MCPRepl.get_pid_file_path(test_dir)
+
+                touch(socket_path)
+
+                # Test with current process PID (should exist and we have permission)
+                write(pid_file, string(getpid()))
+                @test MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Test again with current PID to verify consistency
+                @test MCPRepl.MCPPlex.check_server_running(socket_path)
+
+                # Test with very high PID (unlikely to exist)
+                write(pid_file, string(typemax(Int32)))
+                @test !MCPRepl.MCPPlex.check_server_running(socket_path)
             finally
                 rm(test_dir; recursive=true, force=true)
             end
@@ -578,11 +729,13 @@ using Sockets
                 # Start server in proj1
                 socket1 = joinpath(proj1_dir, ".mcp-repl.sock")
                 server1 = MCPRepl.start_mcp_server([time_tool]; mode=:socket, socket_path=socket1, verbose=false)
+                MCPRepl.write_pid_file(proj1_dir)
                 sleep(0.1)
 
                 # Start server in proj2
                 socket2 = joinpath(proj2_dir, ".mcp-repl.sock")
                 server2 = MCPRepl.start_mcp_server([echo_tool]; mode=:socket, socket_path=socket2, verbose=false)
+                MCPRepl.write_pid_file(proj2_dir)
                 sleep(0.1)
 
                 # Test forwarding to proj1
@@ -599,6 +752,121 @@ using Sockets
             finally
                 rm(proj1_dir; recursive=true, force=true)
                 rm(proj2_dir; recursive=true, force=true)
+            end
+        end
+
+        @testset "Three Project Multiplexing Integration" begin
+            # Create three separate project directories with servers
+            proj1_dir = mktempdir()
+            proj2_dir = mktempdir()
+            proj3_dir = mktempdir()
+
+            # Create different tools for each project
+            counter_tool = MCPTool(
+                "counter",
+                "Return counter value",
+                Dict("type" => "object", "properties" => Dict{String,Any}(), "required" => String[]),
+                let counter = Ref(0)
+                    args -> begin
+                        counter[] += 1
+                        return "Counter: $(counter[])"
+                    end
+                end
+            )
+
+            uppercase_tool = MCPTool(
+                "uppercase",
+                "Convert text to uppercase",
+                MCPRepl.text_parameter("text", "Text to convert"),
+                args -> uppercase(get(args, "text", ""))
+            )
+
+            reverse_tool = MCPTool(
+                "reverse",
+                "Reverse text",
+                MCPRepl.text_parameter("text", "Text to reverse"),
+                args -> reverse(get(args, "text", ""))
+            )
+
+            try
+                # Start servers in all three projects
+                socket1 = joinpath(proj1_dir, ".mcp-repl.sock")
+                pid1 = MCPRepl.get_pid_file_path(proj1_dir)
+                server1 = MCPRepl.start_mcp_server([counter_tool]; mode=:socket, socket_path=socket1, verbose=false)
+                write(pid1, string(getpid()))
+                sleep(0.1)
+
+                socket2 = joinpath(proj2_dir, ".mcp-repl.sock")
+                pid2 = MCPRepl.get_pid_file_path(proj2_dir)
+                server2 = MCPRepl.start_mcp_server([uppercase_tool]; mode=:socket, socket_path=socket2, verbose=false)
+                write(pid2, string(getpid()))
+                sleep(0.1)
+
+                socket3 = joinpath(proj3_dir, ".mcp-repl.sock")
+                pid3 = MCPRepl.get_pid_file_path(proj3_dir)
+                server3 = MCPRepl.start_mcp_server([reverse_tool]; mode=:socket, socket_path=socket3, verbose=false)
+                write(pid3, string(getpid()))
+                sleep(0.1)
+
+                # Verify all servers are running via PID check
+                @test MCPRepl.MCPPlex.check_server_running(socket1)
+                @test MCPRepl.MCPPlex.check_server_running(socket2)
+                @test MCPRepl.MCPPlex.check_server_running(socket3)
+
+                # Verify all PID files exist
+                @test ispath(pid1)
+                @test ispath(pid2)
+                @test ispath(pid3)
+
+                # Test forwarding to proj1 (counter)
+                result1a = MCPRepl.MCPPlex.forward_to_julia_server("counter", proj1_dir, Dict{String,Any}(), false)
+                @test result1a == "Counter: 1"
+                result1b = MCPRepl.MCPPlex.forward_to_julia_server("counter", proj1_dir, Dict{String,Any}(), false)
+                @test result1b == "Counter: 2"
+
+                # Test forwarding to proj2 (uppercase)
+                result2 = MCPRepl.MCPPlex.forward_to_julia_server("uppercase", proj2_dir, Dict{String,Any}("text" => "hello world"), false)
+                @test result2 == "HELLO WORLD"
+
+                # Test forwarding to proj3 (reverse)
+                result3 = MCPRepl.MCPPlex.forward_to_julia_server("reverse", proj3_dir, Dict{String,Any}("text" => "julia"), false)
+                @test result3 == "ailuj"
+
+                # Test interleaved requests to different projects
+                r1 = MCPRepl.MCPPlex.forward_to_julia_server("counter", proj1_dir, Dict{String,Any}(), false)
+                r2 = MCPRepl.MCPPlex.forward_to_julia_server("uppercase", proj2_dir, Dict{String,Any}("text" => "test"), false)
+                r3 = MCPRepl.MCPPlex.forward_to_julia_server("reverse", proj3_dir, Dict{String,Any}("text" => "abc"), false)
+                @test r1 == "Counter: 3"
+                @test r2 == "TEST"
+                @test r3 == "cba"
+
+                # Stop servers and verify cleanup
+                MCPRepl.stop_mcp_server(server1)
+                MCPRepl.stop_mcp_server(server2)
+                MCPRepl.stop_mcp_server(server3)
+
+                # Verify all PID files are removed
+                @test !ispath(pid1)
+                @test !ispath(pid2)
+                @test !ispath(pid3)
+
+                # Verify all socket files are removed
+                @test !ispath(socket1)
+                @test !ispath(socket2)
+                @test !ispath(socket3)
+
+                # Verify servers are no longer detected as running
+                @test !MCPRepl.MCPPlex.check_server_running(socket1)
+                @test !MCPRepl.MCPPlex.check_server_running(socket2)
+                @test !MCPRepl.MCPPlex.check_server_running(socket3)
+            finally
+                rm(proj1_dir; recursive=true, force=true)
+                rm(proj2_dir; recursive=true, force=true)
+                rm(proj3_dir; recursive=true, force=true)
+                # Clear socket cache for all three directories
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(proj1_dir))
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(proj2_dir))
+                delete!(MCPRepl.MCPPlex.SOCKET_CACHE, abspath(proj3_dir))
             end
         end
 
@@ -684,12 +952,11 @@ using Sockets
             request = Dict("jsonrpc" => "2.0", "id" => 2, "method" => "tools/list")
             response = MCPRepl.MCPPlex.process_mcp_request(request)
             @test haskey(response["result"], "tools")
-            @test length(response["result"]["tools"]) == 4
+            @test length(response["result"]["tools"]) == 3
             tool_names = [t["name"] for t in response["result"]["tools"]]
             @test "exec_repl" in tool_names
             @test "investigate_environment" in tool_names
             @test "usage_instructions" in tool_names
-            @test "remove-trailing-whitespace" in tool_names
 
             # Test invalid method
             request = Dict("jsonrpc" => "2.0", "id" => 3, "method" => "invalid/method")
@@ -747,9 +1014,6 @@ using Sockets
             @test occursin("Error: project_dir parameter is required", result)
 
             result = MCPRepl.MCPPlex.handle_usage_instructions(Dict{String,Any}())
-            @test occursin("Error: project_dir parameter is required", result)
-
-            result = MCPRepl.MCPPlex.handle_remove_trailing_whitespace(Dict{String,Any}())
             @test occursin("Error: project_dir parameter is required", result)
         end
 

@@ -6,6 +6,7 @@ using JSON3
 using Sockets
 
 const SOCKET_NAME = ".mcp-repl.sock"
+const PID_FILE_NAME = ".mcp-repl.pid"
 const MCP_PROTOCOL_VERSION = "2024-11-05"
 
 include("Tools.jl")
@@ -66,6 +67,39 @@ function get_socket_path(socket_dir::String=get_project_dir())
 end
 
 """
+    get_pid_file_path(socket_dir::String=get_project_dir())
+
+Returns the path to the PID file in the specified directory.
+"""
+function get_pid_file_path(socket_dir::String=get_project_dir())
+    return joinpath(socket_dir, PID_FILE_NAME)
+end
+
+"""
+    process_exists(pid::Integer) -> Bool
+
+Check if a process with the given PID exists using kill(pid, 0).
+This doesn't send a signal, just checks if we can signal the process.
+Returns true if the process exists, false otherwise.
+"""
+function process_exists(pid::Integer)
+    # kill(pid, 0) returns 0 if process exists and we can signal it
+    # Returns -1 if process doesn't exist or we lack permission
+    return ccall(:kill, Cint, (Cint, Cint), pid, 0) == 0
+end
+
+"""
+    write_pid_file(socket_dir::String=get_project_dir()) -> Nothing
+
+Writes the current process ID to the PID file.
+"""
+function write_pid_file(socket_dir::String=get_project_dir())
+    pid_file = get_pid_file_path(socket_dir)
+    write(pid_file, string(getpid()))
+    return nothing
+end
+
+"""
     remove_socket_file(socket_dir::String=get_project_dir()) -> Nothing
 
 Removes the socket file if it exists.
@@ -77,37 +111,47 @@ function remove_socket_file(socket_dir::String=get_project_dir())
 end
 
 """
+    remove_pid_file(socket_dir::String=get_project_dir()) -> Nothing
+
+Removes the PID file if it exists.
+"""
+function remove_pid_file(socket_dir::String=get_project_dir())
+    pid_file = get_pid_file_path(socket_dir)
+    ispath(pid_file) && rm(pid_file)
+    return nothing
+end
+
+"""
     check_existing_server(socket_dir::String=get_project_dir())
 
-Checks if an MCP server is already running by attempting to connect to the socket
-and sending a lightweight request. Returns true if a server responds, false otherwise.
-Cleans up stale socket files if no server is responding.
+Checks if an MCP server is already running by checking the PID file.
+Returns true if a server is running, false otherwise.
+Cleans up stale socket and PID files if no server is running.
 """
 function check_existing_server(socket_dir::String=get_project_dir())
+    pid_file = get_pid_file_path(socket_dir)
     socket_path = get_socket_path(socket_dir)
 
-    !ispath(socket_path) && return false
+    !ispath(pid_file) && !ispath(socket_path) && return false
 
-    try
-        sock = Sockets.connect(socket_path)
-        request = Dict(
-            "jsonrpc" => "2.0",
-            "id" => 0,
-            "method" => "tools/list",
-            "params" => Dict{String,Any}()
-        )
-        println(sock, JSON3.write(request))
-        response_line = readline(sock)
-        close(sock)
-        if !isempty(response_line)
-            return true
+    # Check PID file
+    if ispath(pid_file)
+        try
+            pid_str = strip(read(pid_file, String))
+            pid = parse(Int, pid_str)
+
+            # Check if process exists using direct system call
+            if process_exists(pid)
+                return true
+            end
+        catch
+            # Invalid PID file or process doesn't exist
         end
-    catch
-        # Connection failed, socket is stale
     end
 
-    # No server responding, clean up stale socket
+    # No server running, clean up stale files
     remove_socket_file(socket_dir)
+    remove_pid_file(socket_dir)
     return false
 end
 
@@ -151,6 +195,13 @@ function start!(; multiplex::Bool=false,
         args -> Tools.handle_investigate_environment()
     )
 
+    tools = [
+        usage_instructions_tool,
+        repl_tool,
+        whitespace_tool,
+        investigate_tool
+    ]
+
     # Create and start server
     if multiplex
         # Socket mode for multiplexer
@@ -162,10 +213,13 @@ function start!(; multiplex::Bool=false,
             error("MCP server already running at $socket_path")
         end
 
-        SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool];
+        SERVER[] = start_mcp_server(tools;
                                     mode=:socket,
                                     socket_path=socket_path,
                                     verbose=verbose)
+
+        # Write PID file
+        write_pid_file(socket_dir_actual)
 
         # Register atexit hook for cleanup
         atexit() do
@@ -178,7 +232,7 @@ function start!(; multiplex::Bool=false,
         end
     else
         # HTTP mode (default)
-        SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool];
+        SERVER[] = start_mcp_server(tools;
                                     mode=:http,
                                     port=port,
                                     verbose=verbose)
@@ -224,15 +278,7 @@ end
 function stop!()
     if SERVER[] !== nothing
         println("Stop existing server...")
-
-        # For socket mode, clean up socket file
-        if SERVER[].handle isa MCPRepl.SocketServerHandle
-            socket_dir = dirname(SERVER[].handle.socket_path)
-            stop_mcp_server(SERVER[])
-            remove_socket_file(socket_dir)
-        else
-            stop_mcp_server(SERVER[])
-        end
+        stop_mcp_server(SERVER[])
 
         SERVER[] = nothing
         if isdefined(Base, :active_repl)

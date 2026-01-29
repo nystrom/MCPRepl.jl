@@ -56,7 +56,7 @@ HTTP mode is simpler and suitable when working in one Julia project. In this mod
 ```julia-repl
 julia> using MCPRepl
 julia> MCPRepl.start!()
-MCP Server running on port 3000 with 4 tools
+MCP Server running on port 3000 with 3 tools
 ```
 
 **Configure Claude Code:**
@@ -91,12 +91,12 @@ Multiplexer mode uses Unix sockets and a multiplexer to route requests to multip
 # In project 1
 julia> using MCPRepl
 julia> MCPRepl.start!(multiplex=true)
-MCP Server running on /path/to/project1/.mcp-repl.sock with 4 tools
+MCP Server running on /path/to/project1/.mcp-repl.sock with 3 tools
 
 # In project 2
 julia> using MCPRepl
 julia> MCPRepl.start!(multiplex=true)
-MCP Server running on /path/to/project2/.mcp-repl.sock with 4 tools
+MCP Server running on /path/to/project2/.mcp-repl.sock with 3 tools
 ```
 
 This creates a Unix socket file (`.mcp-repl.sock`) and PID file (`.mcp-repl.pid`) in each project directory.

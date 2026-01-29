@@ -1,3 +1,5 @@
+const PID_FILE_NAME = ".mcp-repl.pid"
+
 # Tool definition structure
 struct MCPTool
     name::String
@@ -532,9 +534,14 @@ function stop_mcp_server(server::MCPServer)
         end
         empty!(server.handle.client_tasks)
 
-        # Remove socket
+        # Remove socket and PID file
+        socket_dir = dirname(server.handle.socket_path)
         if ispath(server.handle.socket_path)
             rm(server.handle.socket_path)
+        end
+        pid_file = joinpath(socket_dir, PID_FILE_NAME)
+        if ispath(pid_file)
+            rm(pid_file)
         end
     end
 

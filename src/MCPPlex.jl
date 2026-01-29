@@ -26,6 +26,7 @@ using HTTP
 using ..Tools: TOOL_DEFINITIONS, make_tool_schema, get_tool_description, get_tool_names
 
 const SOCKET_NAME = ".mcp-repl.sock"
+const PID_FILE_NAME = ".mcp-repl.pid"
 const MCP_PROTOCOL_VERSION = "2024-11-05"
 
 # NOTE: SOCKET_CACHE is not thread-safe. This multiplexer assumes single-threaded
@@ -71,27 +72,38 @@ function find_socket_path(start_dir::String)
 end
 
 """
+    process_exists(pid::Integer) -> Bool
+
+Check if a process with the given PID exists using kill(pid, 0).
+This doesn't send a signal, just checks if we can signal the process.
+Returns true if the process exists, false otherwise.
+"""
+function process_exists(pid::Integer)
+    # kill(pid, 0) returns 0 if process exists and we can signal it
+    # Returns -1 if process doesn't exist or we lack permission
+    return ccall(:kill, Cint, (Cint, Cint), pid, 0) == 0
+end
+
+"""
     check_server_running(socket_path::String) -> Bool
 
-Check if the MCP server is running by attempting to connect to the socket
-and sending a lightweight tools/list request.
-Returns true if server responds, false otherwise.
+Check if the MCP server is running by checking the PID file.
+Returns true if server is running, false otherwise.
 """
 function check_server_running(socket_path::String)
     !ispath(socket_path) && return false
 
+    socket_dir = dirname(socket_path)
+    pid_file = joinpath(socket_dir, PID_FILE_NAME)
+
+    !ispath(pid_file) && return false
+
     try
-        sock = connect(socket_path)
-        request = Dict(
-            "jsonrpc" => "2.0",
-            "id" => 0,
-            "method" => "tools/list",
-            "params" => Dict{String,Any}()
-        )
-        println(sock, JSON3.write(request))
-        response_line = readline(sock)
-        close(sock)
-        return !isempty(response_line)
+        pid_str = strip(read(pid_file, String))
+        pid = parse(Int, pid_str)
+
+        # Check if process exists using direct system call
+        return process_exists(pid)
     catch
         return false
     end
