@@ -150,25 +150,11 @@ function process_jsonrpc_request(request::Dict{String,Any}, tools::Dict{String,M
     )
 end
 
-# Socket read timeout in seconds
-const SOCKET_READ_TIMEOUT = 60.0
-
 # Handle a single socket client connection
 function handle_socket_client(client::IO, tools::Dict{String,MCPTool})
     try
         while isopen(client)
-            # Read with timeout to prevent indefinite blocking
-            read_task = @async readline(client)
-            if timedwait(() -> istaskdone(read_task), SOCKET_READ_TIMEOUT) == :timed_out
-                printstyled("\nMCP Server: client read timeout, closing connection\n", color=:yellow)
-                try
-                    Base.throwto(read_task, InterruptException())
-                catch
-                end
-                break
-            end
-
-            line = fetch(read_task)
+            line = readline(client)
             isempty(line) && continue
 
             request_id = 0
